@@ -10,7 +10,7 @@ const { apiBaseUrl = '' } = Astro.props;
 <div class="reservation-modal-overlay" id="reservationModalOverlay" data-api-base={apiBaseUrl}>
   <div class="reservation-modal" id="reservationModal">
     <div class="modal-header">
-      <h2>&#128222; 予約依頼</h2>
+      <h2 id="modalTitle">&#128222; 予約依頼</h2>
       <button class="close-btn" id="closeReservationModal">&times;</button>
     </div>
 
@@ -18,24 +18,24 @@ const { apiBaseUrl = '' } = Astro.props;
       <!-- 店舗選択エリア -->
       <div class="shop-selection-area">
         <div class="section-header">
-          <h3>&#127942; お店を選択</h3>
+          <h3 id="shopSelectTitle">&#127942; お店を選択</h3>
           <p class="selection-guide" id="selectionGuide">優先順にクリックしてください（最大3件）</p>
           <button class="reset-btn" id="resetSelection">やり直し</button>
         </div>
         <div class="shop-list-compact" id="shopListCompact">
           <!-- 店舗リストはJSで動的に追加 -->
         </div>
-        <p class="priority-note">
+        <p class="priority-note" id="priorityNote">
           &#8505; ①→②→③の順で電話します。予約成立時点で終了します。
         </p>
       </div>
 
       <!-- 共通設定エリア -->
       <div class="common-settings" id="commonSettings">
-        <h3>&#128203; 予約内容</h3>
+        <h3 id="contentTitle">&#128203; 予約内容</h3>
 
         <div class="form-row">
-          <label>&#128101; 人数</label>
+          <label id="guestCountLabel">&#128101; 人数</label>
           <select id="guestCount">
             <option value="1">1名</option>
             <option value="2" selected>2名</option>
@@ -51,14 +51,14 @@ const { apiBaseUrl = '' } = Astro.props;
         </div>
 
         <div class="form-row">
-          <label>&#128197; 希望日</label>
+          <label id="dateLabel">&#128197; 希望日</label>
           <input type="date" id="reservationDate" />
         </div>
 
         <div class="form-row">
-          <label>&#9200; 開始時間</label>
+          <label id="timeLabel">&#9200; 開始時間</label>
           <select id="startTime">
-            <option value="">選択してください</option>
+            <option value="" id="selectPlaceholder">選択してください</option>
             <option value="11:00">11:00</option>
             <option value="11:30">11:30</option>
             <option value="12:00">12:00</option>
@@ -79,7 +79,7 @@ const { apiBaseUrl = '' } = Astro.props;
         </div>
 
         <div class="form-row time-flexibility">
-          <label>&#9201; 時間の許容範囲</label>
+          <label id="timeFlexibilityLabel">&#9201; 時間の許容範囲</label>
           <div class="radio-group">
             <label class="radio-label">
               <input type="radio" name="timeFlexibility" value="exact" checked />
@@ -101,7 +101,7 @@ const { apiBaseUrl = '' } = Astro.props;
         </div>
 
         <div class="form-row">
-          <label>&#129681; 席の希望</label>
+          <label id="seatPreferenceLabel">&#129681; 席の希望</label>
           <div class="checkbox-group">
             <label class="checkbox-label">
               <input type="checkbox" name="seatType" value="table" checked />
@@ -119,7 +119,7 @@ const { apiBaseUrl = '' } = Astro.props;
         </div>
 
         <div class="form-row">
-          <label>&#128221; その他の希望</label>
+          <label id="otherRequestsLabel">&#128221; その他の希望</label>
           <div class="textarea-with-mic">
             <textarea id="otherRequests" placeholder="誕生日ケーキ、アレルギー対応、禁煙席など"></textarea>
             <button type="button" class="mic-btn" id="otherRequestsMic" title="音声入力">
@@ -144,13 +144,13 @@ const { apiBaseUrl = '' } = Astro.props;
 
       <!-- 予約者情報 -->
       <div class="reserver-info">
-        <h3>&#128100; 予約者情報</h3>
+        <h3 id="reserverInfoTitle">&#128100; 予約者情報</h3>
         <div class="form-row">
-          <label>お名前</label>
+          <label id="reserverNameLabel">お名前</label>
           <input type="text" id="reserverName" value="山田太郎" placeholder="予約者のお名前" />
         </div>
         <div class="form-row">
-          <label>&#128241; 携帯番号</label>
+          <label id="reserverPhoneLabel">&#128241; 携帯番号</label>
           <input type="tel" id="reserverPhone" value="09012345678" placeholder="090xxxxxxxx" />
           <p class="field-hint">※ 店舗への連絡先として伝えます</p>
         </div>
@@ -961,7 +961,7 @@ const { apiBaseUrl = '' } = Astro.props;
       this.selectedShops = [];
       this.perShopMode = false;
       this.perShopBtn.classList.remove('active');
-      this.perShopBtn.innerHTML = '&#9881; お店毎に予約内容を変える';
+      this.perShopBtn.innerHTML = `&#9881; ${this.t('reservationPerShopBtn')}`;
       this.selectedShopsDetail.innerHTML = '';
       this.selectedShopsDetail.classList.remove('has-selection');
       this.renderShopList();
@@ -995,10 +995,10 @@ const { apiBaseUrl = '' } = Astro.props;
           <div class="shop-info-compact">
             <div class="shop-name-compact">${shop.name}</div>
             <div class="shop-meta-compact">
-              ${shop.rating ? `<span>⭐${shop.rating}</span>` : ''}
+              ${shop.rating ? `<span>$2B50${shop.rating}</span>` : ''}
               ${shop.location ? `<span>${this.truncateLocation(shop.location)}</span>` : ''}
               ${shop.priceRange ? `<span>${shop.priceRange}</span>` : ''}
-              ${shop.phone ? `<span class="shop-phone">📞${shop.phone}</span>` : ''}
+              ${shop.phone ? `<span class="shop-phone">$D83D$DCDE${shop.phone}</span>` : ''}
             </div>
           </div>
         `;
@@ -1055,14 +1055,20 @@ const { apiBaseUrl = '' } = Astro.props;
       }
     }
 
+    private t(key: string, ...args: any[]): string {
+      const gourmetI18n = (window as any).gourmetI18n;
+      if (!gourmetI18n) return key;
+      return gourmetI18n.t(key, ...args);
+    }
+
     private updateSelectionGuide() {
       const remaining = this.maxSelection - this.selectedShops.length;
       if (this.selectedShops.length === 0) {
-        this.selectionGuide.textContent = '優先順にクリックしてください（最大3件）';
+        this.selectionGuide.textContent = this.t('reservationSelectionGuide');
       } else if (remaining > 0) {
-        this.selectionGuide.textContent = `あと${remaining}件選択できます`;
+        this.selectionGuide.textContent = this.t('reservationSelectionRemaining', remaining);
       } else {
-        this.selectionGuide.textContent = '選択完了（変更するには店舗をクリック）';
+        this.selectionGuide.textContent = this.t('reservationSelectionComplete');
       }
     }
 
@@ -1075,10 +1081,10 @@ const { apiBaseUrl = '' } = Astro.props;
       this.perShopBtn.classList.toggle('active', this.perShopMode);
 
       if (this.perShopMode) {
-        this.perShopBtn.innerHTML = '&#10003; 共通設定に戻す';
+        this.perShopBtn.innerHTML = `&#10003; ${this.t('reservationBackToCommon')}`;
         this.renderPerShopSettings();
       } else {
-        this.perShopBtn.innerHTML = '&#9881; お店毎に予約内容を変える';
+        this.perShopBtn.innerHTML = `&#9881; ${this.t('reservationPerShopBtn')}`;
         this.selectedShopsDetail.innerHTML = '';
         this.selectedShopsDetail.classList.remove('has-selection');
       }
@@ -1086,7 +1092,7 @@ const { apiBaseUrl = '' } = Astro.props;
 
     private renderPerShopSettings() {
       if (this.selectedShops.length === 0) {
-        this.selectedShopsDetail.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 20px;">先にお店を選択してください</p>';
+        this.selectedShopsDetail.innerHTML = `<p style="text-align: center; color: #6b7280; padding: 20px;">${this.t('reservationSelectShopsFirst')}</p>`;
         this.selectedShopsDetail.classList.add('has-selection');
         return;
       }
@@ -1107,74 +1113,74 @@ const { apiBaseUrl = '' } = Astro.props;
             </div>
             <div class="shop-detail-form">
               <div class="form-row shop-phone-row">
-                <label>📞 電話番号</label>
+                <label>$D83D$DCDE ${this.t('reservationPhoneLabel')}</label>
                 <input type="tel" class="shop-phone-input" value="${currentPhone}" placeholder="03-xxxx-xxxx" />
-                <p class="field-hint-sm">※ Places APIから取得。修正可能</p>
+                <p class="field-hint-sm">${this.t('reservationPhoneHint')}</p>
               </div>
               <div class="form-row">
-                <label>👥 人数</label>
+                <label>$D83D$DC65 ${this.t('reservationGuestCount')}</label>
                 <select class="shop-guest-count">
                   ${[1,2,3,4,5,6,7,8,9,10].map(n =>
-                    `<option value="${n}" ${settings.guestCount == n ? 'selected' : ''}>${n}${n === 10 ? '名以上' : '名'}</option>`
+                    `<option value="${n}" ${settings.guestCount == n ? 'selected' : ''}>${this.t('reservationGuestOption', n)}</option>`
                   ).join('')}
                 </select>
               </div>
               <div class="form-row">
-                <label>📅 希望日</label>
+                <label>$D83D$DCC5 ${this.t('reservationDate')}</label>
                 <input type="date" class="shop-date" value="${settings.date || ''}" />
               </div>
               <div class="form-row">
-                <label>⏰ 開始時間</label>
+                <label>$23F0 ${this.t('reservationTime')}</label>
                 <select class="shop-start-time">
-                  <option value="">選択してください</option>
+                  <option value="">${this.t('reservationSelectPlaceholder')}</option>
                   ${['11:00','11:30','12:00','12:30','13:00','13:30','17:00','17:30','18:00','18:30','19:00','19:30','20:00','20:30','21:00','21:30'].map(t =>
                     `<option value="${t}" ${settings.startTime === t ? 'selected' : ''}>${t}</option>`
                   ).join('')}
                 </select>
               </div>
               <div class="form-row">
-                <label>⏱ 時間の許容範囲</label>
+                <label>$23F1 ${this.t('reservationTimeFlexibility')}</label>
                 <div class="radio-group-inline">
                   <label class="radio-label-sm">
                     <input type="radio" name="timeFlexibility_${index}" value="exact" ${settings.timeFlexibility === 'exact' || !settings.timeFlexibility ? 'checked' : ''} />
-                    <span>開始時間優先</span>
+                    <span>${this.t('reservationTimeExact')}</span>
                   </label>
                   <label class="radio-label-sm">
                     <input type="radio" name="timeFlexibility_${index}" value="30" ${settings.timeFlexibility === '30' ? 'checked' : ''} />
-                    <span>+30分</span>
+                    <span>${this.t('reservationTimePlus30')}</span>
                   </label>
                   <label class="radio-label-sm">
                     <input type="radio" name="timeFlexibility_${index}" value="60" ${settings.timeFlexibility === '60' ? 'checked' : ''} />
-                    <span>+60分</span>
+                    <span>${this.t('reservationTimePlus60')}</span>
                   </label>
                   <label class="radio-label-sm">
                     <input type="radio" name="timeFlexibility_${index}" value="90" ${settings.timeFlexibility === '90' ? 'checked' : ''} />
-                    <span>+90分</span>
+                    <span>${this.t('reservationTimePlus90')}</span>
                   </label>
                 </div>
               </div>
               <div class="form-row">
-                <label>🪑 席の希望</label>
+                <label>$D83E$DE91 ${this.t('reservationSeatPreference')}</label>
                 <div class="checkbox-group-inline">
                   <label class="checkbox-label-sm">
                     <input type="checkbox" class="shop-seat-table" value="table" ${seatTypes.includes('table') ? 'checked' : ''} />
-                    <span>テーブル席</span>
+                    <span>${this.t('reservationSeatTable')}</span>
                   </label>
                   <label class="checkbox-label-sm">
                     <input type="checkbox" class="shop-seat-counter" value="counter" ${seatTypes.includes('counter') ? 'checked' : ''} />
-                    <span>カウンター席</span>
+                    <span>${this.t('reservationSeatCounter')}</span>
                   </label>
                   <label class="checkbox-label-sm">
                     <input type="checkbox" class="shop-seat-private" value="private" ${seatTypes.includes('private') ? 'checked' : ''} />
-                    <span>個室</span>
+                    <span>${this.t('reservationSeatPrivate')}</span>
                   </label>
                 </div>
               </div>
               <div class="form-row">
-                <label>📝 その他の希望</label>
+                <label>$D83D$DCDD ${this.t('reservationOtherRequests')}</label>
                 <div class="textarea-with-mic-sm">
-                  <textarea class="shop-other-requests" placeholder="このお店への特別なリクエスト">${settings.otherRequests || ''}</textarea>
-                  <button type="button" class="mic-btn-sm shop-mic-btn" data-shop-index="${index}" title="音声入力">🎤</button>
+                  <textarea class="shop-other-requests" placeholder="${this.t('reservationPerShopPlaceholder')}">${settings.otherRequests || ''}</textarea>
+                  <button type="button" class="mic-btn-sm shop-mic-btn" data-shop-index="${index}" title="音声入力">$D83C$DFA4</button>
                 </div>
               </div>
             </div>
@@ -1231,7 +1237,7 @@ const { apiBaseUrl = '' } = Astro.props;
           mediaRecorder?.stop();
           isRecording = false;
           micBtn.classList.remove('recording');
-          micBtn.textContent = '🎤';
+          micBtn.textContent = '$D83C$DFA4';
           return;
         }
 
@@ -1273,7 +1279,7 @@ const { apiBaseUrl = '' } = Astro.props;
           mediaRecorder.start();
           isRecording = true;
           micBtn.classList.add('recording');
-          micBtn.textContent = '⏹';
+          micBtn.textContent = '$23F9';
 
           // 5秒後に自動停止
           setTimeout(() => {
@@ -1281,7 +1287,7 @@ const { apiBaseUrl = '' } = Astro.props;
               mediaRecorder.stop();
               isRecording = false;
               micBtn.classList.remove('recording');
-              micBtn.textContent = '🎤';
+              micBtn.textContent = '$D83C$DFA4';
             }
           }, 5000);
 
@@ -1361,10 +1367,17 @@ const { apiBaseUrl = '' } = Astro.props;
       //   body: JSON.stringify(reservationData)
       // });
 
-      alert('予約依頼を受け付けました。\n\n予約者: ' + reserverInfo.name + '\n連絡先: ' + reserverInfo.phone +
-        '\n\n選択されたお店:\n' +
-        this.selectedShops.map((s, i) => `${i + 1}. ${s.name} (${s.editedPhone || s.phone || '電話番号なし'})`).join('\n') +
-        '\n\n（この機能は現在開発中です）');
+      const shopsList = this.selectedShops.map((s, i) =>
+        `${i + 1}. ${s.name} (${s.editedPhone || s.phone || this.t('reservationAlertNoPhone')})`
+      ).join('\n');
+
+      alert(
+        `${this.t('reservationAlertTitle')}\n\n` +
+        `${this.t('reservationAlertReserver')}: ${reserverInfo.name}\n` +
+        `${this.t('reservationAlertContact')}: ${reserverInfo.phone}\n\n` +
+        `${this.t('reservationAlertShops')}:\n${shopsList}\n\n` +
+        `${this.t('reservationAlertDevNote')}`
+      );
     }
   }
 
@@ -1555,6 +1568,136 @@ const { apiBaseUrl = '' } = Astro.props;
     }
   }
 
+  // 多言語化: UI要素を更新
+  function updateReservationModalLanguage() {
+    const gourmetI18n = (window as any).gourmetI18n;
+    if (!gourmetI18n) return;
+
+    const t = gourmetI18n.t;
+
+    // モーダルヘッダー
+    const modalTitle = document.getElementById('modalTitle');
+    if (modalTitle) modalTitle.innerHTML = `&#128222; ${t('reservationModalTitle')}`;
+
+    // 店舗選択エリア
+    const shopSelectTitle = document.getElementById('shopSelectTitle');
+    if (shopSelectTitle) shopSelectTitle.innerHTML = `&#127942; ${t('reservationShopSelect')}`;
+
+    const selectionGuide = document.getElementById('selectionGuide');
+    if (selectionGuide) selectionGuide.textContent = t('reservationSelectionGuide');
+
+    const resetBtn = document.getElementById('resetSelection');
+    if (resetBtn) resetBtn.textContent = t('reservationResetBtn');
+
+    const priorityNote = document.getElementById('priorityNote');
+    if (priorityNote) priorityNote.innerHTML = `&#8505; ${t('reservationPriorityNote')}`;
+
+    // 予約内容エリア
+    const contentTitle = document.getElementById('contentTitle');
+    if (contentTitle) contentTitle.innerHTML = `&#128203; ${t('reservationContentTitle')}`;
+
+    const guestCountLabel = document.getElementById('guestCountLabel');
+    if (guestCountLabel) guestCountLabel.innerHTML = `&#128101; ${t('reservationGuestCount')}`;
+
+    // 人数オプションを更新
+    const guestCountSelect = document.getElementById('guestCount') as HTMLSelectElement;
+    if (guestCountSelect) {
+      const options = guestCountSelect.querySelectorAll('option');
+      options.forEach((option, index) => {
+        const value = parseInt(option.value);
+        option.textContent = t('reservationGuestOption', value);
+      });
+    }
+
+    const dateLabel = document.getElementById('dateLabel');
+    if (dateLabel) dateLabel.innerHTML = `&#128197; ${t('reservationDate')}`;
+
+    const timeLabel = document.getElementById('timeLabel');
+    if (timeLabel) timeLabel.innerHTML = `&#9200; ${t('reservationTime')}`;
+
+    const selectPlaceholder = document.getElementById('selectPlaceholder');
+    if (selectPlaceholder) selectPlaceholder.textContent = t('reservationSelectPlaceholder');
+
+    // 時間の許容範囲ラベル
+    const timeFlexibilityLabel = document.getElementById('timeFlexibilityLabel');
+    if (timeFlexibilityLabel) timeFlexibilityLabel.innerHTML = `&#9201; ${t('reservationTimeFlexibility')}`;
+
+    // 時間の許容範囲
+    const timeFlexibilityLabels = document.querySelectorAll('.time-flexibility label span');
+    if (timeFlexibilityLabels.length >= 4) {
+      (timeFlexibilityLabels[0] as HTMLElement).textContent = t('reservationTimeExact');
+      (timeFlexibilityLabels[1] as HTMLElement).textContent = t('reservationTimePlus30');
+      (timeFlexibilityLabels[2] as HTMLElement).textContent = t('reservationTimePlus60');
+      (timeFlexibilityLabels[3] as HTMLElement).textContent = t('reservationTimePlus90');
+    }
+
+    // 席の希望ラベル
+    const seatPreferenceLabel = document.getElementById('seatPreferenceLabel');
+    if (seatPreferenceLabel) seatPreferenceLabel.innerHTML = `&#129681; ${t('reservationSeatPreference')}`;
+
+    // 席の希望
+    const seatLabels = document.querySelectorAll('label[class="checkbox-label"] span');
+    let seatIndex = 0;
+    seatLabels.forEach((label) => {
+      const input = (label as HTMLElement).previousElementSibling as HTMLInputElement;
+      if (input && input.name === 'seatType') {
+        if (input.value === 'table') {
+          (label as HTMLElement).textContent = t('reservationSeatTable');
+        } else if (input.value === 'counter') {
+          (label as HTMLElement).textContent = t('reservationSeatCounter');
+        } else if (input.value === 'private') {
+          (label as HTMLElement).textContent = t('reservationSeatPrivate');
+        }
+      }
+    });
+
+    // その他の希望ラベル
+    const otherRequestsLabel = document.getElementById('otherRequestsLabel');
+    if (otherRequestsLabel) otherRequestsLabel.innerHTML = `&#128221; ${t('reservationOtherRequests')}`;
+
+    // その他の希望
+    const otherRequestsTextarea = document.getElementById('otherRequests') as HTMLTextAreaElement;
+    if (otherRequestsTextarea) {
+      otherRequestsTextarea.placeholder = t('reservationOtherRequestsPlaceholder');
+    }
+
+    // お店毎設定ボタン
+    const perShopBtn = document.getElementById('togglePerShopSettings');
+    if (perShopBtn && !perShopBtn.classList.contains('active')) {
+      perShopBtn.innerHTML = `&#9881; ${t('reservationPerShopBtn')}`;
+    }
+
+    // 予約者情報タイトル
+    const reserverInfoTitle = document.getElementById('reserverInfoTitle');
+    if (reserverInfoTitle) reserverInfoTitle.innerHTML = `&#128100; ${t('reservationReserverInfo')}`;
+
+    // お名前ラベル
+    const reserverNameLabel = document.getElementById('reserverNameLabel');
+    if (reserverNameLabel) reserverNameLabel.textContent = t('reservationReserverName');
+
+    // 携帯番号ラベル
+    const reserverPhoneLabel = document.getElementById('reserverPhoneLabel');
+    if (reserverPhoneLabel) reserverPhoneLabel.innerHTML = `&#128241; ${t('reservationReserverPhone')}`;
+
+    // 予約者情報
+    const reserverName = document.getElementById('reserverName') as HTMLInputElement;
+    if (reserverName) {
+      reserverName.placeholder = t('reservationReserverNamePlaceholder');
+    }
+
+    const reserverPhoneHint = document.querySelector('.reserver-info .field-hint');
+    if (reserverPhoneHint) {
+      reserverPhoneHint.textContent = t('reservationReserverPhoneHint');
+    }
+
+    // フッターボタン
+    const cancelBtn = document.getElementById('cancelReservation');
+    if (cancelBtn) cancelBtn.textContent = t('reservationCancel');
+
+    const submitBtn = document.getElementById('submitReservation');
+    if (submitBtn) submitBtn.innerHTML = `&#128222; ${t('reservationSubmit')}`;
+  }
+
   // 初期化
   document.addEventListener('DOMContentLoaded', () => {
     const modal = new ReservationModal();
@@ -1566,6 +1709,14 @@ const { apiBaseUrl = '' } = Astro.props;
 
     // 音声入力を初期化
     new VoiceInput('otherRequestsMic', 'otherRequests', 'voiceHint', apiBase);
+
+    // 初期言語を適用
+    updateReservationModalLanguage();
+
+    // 言語変更イベントをリッスン
+    document.addEventListener('languageChange', () => {
+      updateReservationModalLanguage();
+    });
 
     // カスタムイベントをリッスン
     document.addEventListener('openReservationModal', ((event: CustomEvent) => {

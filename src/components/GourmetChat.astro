@@ -1,5 +1,5 @@
 ---
-// GourmetChat.astro - グルメサポートチャットコンポーネント
+// GourmetChat.astro - チャットモード(モード切替機能付き)
 export interface Props {
   apiBaseUrl?: string;
 }
@@ -8,1856 +8,349 @@ const { apiBaseUrl = '' } = Astro.props;
 ---
 
 <div class="gourmet-chat-container" data-api-base={apiBaseUrl}>
-  <div class="voice-status stopped" id="voiceStatus">
-    &#127908; 音声認識: 停止中
+  <div class="splash-overlay" id="splashOverlay">
+    <video id="splashVideo" class="splash-video" autoplay muted playsinline loop>
+      <source src="/splash.mp4" type="video/mp4">
+    </video>
+    <div class="splash-loading"><div class="spinner"></div><p>Loading...</p></div>
   </div>
 
-  <div class="chat-area" id="chatArea">
-    <!-- メッセージはJSで動的に追加 -->
+  <div class="wait-overlay hidden" id="waitOverlay">
+    <div class="wait-content">
+      <video id="waitVideo" class="wait-video" muted playsinline loop>
+        <source src="/wait.mp4" type="video/mp4">
+      </video>
+      <p class="wait-text">Thinking...</p>
+    </div>
   </div>
+
+  <!-- ヘッダーエリア: モード切替 + 言語選択 -->
+  <div class="chat-header-controls">
+    <div class="mode-toggle-wrapper">
+      <label class="switch-label">
+        <span class="label-text">Concierge</span>
+        <div class="toggle-switch">
+          <input type="checkbox" id="modeSwitch">
+          <span class="slider"></span>
+        </div>
+      </label>
+    </div>
+
+    <div class="language-selector">
+      <select id="languageSelect" class="language-dropdown">
+        <option value="ja">日本語</option>
+        <option value="en">English</option>
+        <option value="zh">中文</option>
+        <option value="ko">한국어</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="voice-status stopped" id="voiceStatus">🎤 Ready</div>
+  <div class="chat-area" id="chatArea"></div>
 
   <div class="input-area">
     <div class="input-group">
-      <input 
-        type="text" 
-        id="userInput" 
-        placeholder="メッセージを入力..."
-        disabled
-      />
-      <button class="btn btn-icon btn-mic" id="micBtn" title="音声入力" disabled>
-        &#127908;
-      </button>
-      <button class="btn btn-icon btn-speaker" id="speakerBtn" title="音声読み上げON" disabled>
-        &#128266;
-      </button>
-      <button class="btn" id="sendBtn" disabled>
-        送信
-      </button>
+      <input type="text" id="userInput" placeholder="..." disabled />
+      <button class="btn btn-send-expanded" id="sendBtn">Send</button>
     </div>
-    <div class="input-actions">
-      <button class="btn btn-reservation" id="reservationBtn" disabled>
-        &#128222; 予約依頼する
-      </button>
-    </div>
+  </div>
+  
+  <div class="floating-buttons">
+    <button class="btn-floating btn-reservation-float" id="reservationBtnFloat" title="Reservation">
+      📞 予約依頼
+    </button>
+
+    <button class="btn-floating btn-speaker-float" id="speakerBtnFloat" title="Speaker">
+      <span class="speaker-icon"></span>
+    </button>
+
+    <button class="btn-floating btn-stop" id="stopBtn" title="Stop">
+      <img src="/mic-off.svg" alt="Stop" />
+    </button>
+
+    <button class="btn-floating btn-mic-float" id="micBtnFloat" title="Mic">
+      <img src="/mic-on.svg" alt="Mic On" class="icon-mic" />
+      <img src="/mic-off.svg" alt="Mic Off" class="icon-stop" />
+    </button>
   </div>
 </div>
 
 <style>
-  .gourmet-chat-container {
-    background: white;
-    border-radius: 16px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
-    width: 100%;
-    max-width: 800px;
-    max-height: 600px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    margin: 0 auto;
-  }
+/* 全体レイアウト */
+.gourmet-chat-container { 
+  background: white; 
+  border-radius: 16px; 
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15); 
+  width: 100%; 
+  max-width: 800px; 
+  max-height: 600px; 
+  display: flex; 
+  flex-direction: column; 
+  overflow: hidden; 
+  margin: 0 auto; 
+  position: relative;
+  transition: all 0.5s ease;
+}
 
-  .chat-header {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    padding: 20px;
-    text-align: center;
-  }
+/* コンシェルジュモード時のボーダー */
+.gourmet-chat-container.mode-concierge {
+  border: 2px solid #06b6d4;
+}
 
-  .chat-header h2 {
-    font-size: 20px;
-    font-weight: 600;
-    margin: 0 0 4px 0;
-  }
+/* ヘッダーエリア */
+.chat-header-controls {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  transition: background 0.5s ease;
+}
 
-  .chat-header p {
-    font-size: 13px;
-    opacity: 0.9;
-    margin: 0;
-  }
+.gourmet-chat-container.mode-concierge .chat-header-controls {
+  background: linear-gradient(135deg, #0891b2 0%, #06b6d4 100%);
+}
 
-  .voice-status {
-    padding: 10px 15px;
-    text-align: center;
-    font-size: 12px;
-    border-bottom: 1px solid #e0e0e0;
-    font-weight: 500;
-  }
+.mode-toggle-wrapper { display: flex; align-items: center; }
+.language-selector { display: flex; align-items: center; }
+.language-dropdown { 
+  padding: 6px 12px; 
+  border: 2px solid white; 
+  border-radius: 20px; 
+  background: rgba(255,255,255,0.95); 
+  color: #444; 
+  font-size: 13px; 
+  font-weight: 600; 
+  cursor: pointer; 
+  outline: none; 
+}
 
-  .voice-status.listening {
-    background: #e8f5e9;
-    color: #2e7d32;
-    animation: pulse 2s infinite;
-  }
+/* トグルスイッチ */
+.switch-label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.label-text { color: white; font-size: 12px; font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+.toggle-switch { position: relative; width: 44px; height: 24px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.slider { 
+  position: absolute; 
+  cursor: pointer; 
+  top: 0; left: 0; right: 0; bottom: 0; 
+  background-color: rgba(0,0,0,0.3); 
+  transition: .4s; 
+  border-radius: 24px; 
+  border: 1px solid rgba(255,255,255,0.4); 
+}
+.slider:before { 
+  position: absolute; 
+  content: ""; 
+  height: 18px; 
+  width: 18px; 
+  left: 2px; 
+  bottom: 2px; 
+  background-color: white; 
+  transition: .4s; 
+  border-radius: 50%; 
+}
+input:checked + .slider { background-color: #06b6d4; }
+input:checked + .slider:before { transform: translateX(20px); }
 
-  .voice-status.stopped {
-    background: #ffebee;
-    color: #c62828;
-  }
+.voice-status { padding: 10px 15px; text-align: center; font-size: 12px; border-bottom: 1px solid #e0e0e0; font-weight: 500; }
+.voice-status.listening { background: #e8f5e9; color: #2e7d32; animation: pulse 2s infinite; }
+.voice-status.stopped { background: #ffebee; color: #c62828; }
+.voice-status.speaking { background: #e1f5fe; color: #0277bd; animation: pulse 2s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.8; } }
 
-  .voice-status.speaking {
-    background: #e1f5fe;
-    color: #0277bd;
-    animation: pulse 2s infinite;
-  }
+.chat-area { flex: 1; overflow-y: auto; padding: 20px; background: #f7f9fc; min-height: 300px; }
+:global(.message) { margin-bottom: 16px; display: flex; gap: 10px; }
+:global(.message.assistant) { flex-direction: row; }
+:global(.message.user) { flex-direction: row-reverse; }
+:global(.message-avatar) { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+:global(.message.assistant .message-avatar) { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+:global(.gourmet-chat-container.mode-concierge .message.assistant .message-avatar) {
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%) !important;
+}
+:global(.message.user .message-avatar) { background: #e0e7ff; color: #667eea; }
+:global(.message-content) { max-width: 70%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; font-size: 14px; white-space: pre-wrap; }
+:global(.message.assistant .message-content) { background: white; border: 1px solid #e5e7eb; color: #1f2937; }
+:global(.message.user .message-content) { background: #667eea; color: white; }
 
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.8; }
-  }
+.input-area { padding: 16px; background: white; border-top: 1px solid #e5e7eb; }
+.input-group { display: flex; gap: 10px; align-items: center; }
+#userInput { flex: 1; padding: 10px 14px; border: 2px solid #e5e7eb; border-radius: 20px; font-size: 14px; outline: none; transition: border-color 0.2s; }
+#userInput:focus { border-color: #667eea; }
+.btn { padding: 10px 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 20px; font-size: 14px; font-weight: 600; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
+.btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-send-expanded { padding: 10px 24px; min-width: 100px; }
 
-  .chat-area {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-    background: #f7f9fc;
-    min-height: 300px;
-  }
+.error-message { background: #fee2e2; color: #b91c1c; padding: 10px; border-radius: 8px; margin: 10px 0; font-size: 13px; text-align: center; }
+.splash-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 9999; border-radius: 16px; overflow: hidden; transition: opacity 0.8s ease-out; pointer-events: all; }
+.splash-overlay.fade-out { opacity: 0; pointer-events: none; }
+.splash-overlay.hidden { display: none; }
+.splash-video { width: 100%; height: 100%; object-fit: contain; position: absolute; top: 0; left: 0; transform: scale(0.5); }
+.splash-loading { position: absolute; bottom: 60px; display: flex; flex-direction: column; align-items: center; gap: 12px; z-index: 1; }
+.splash-loading .spinner { width: 40px; height: 40px; border: 4px solid rgba(102, 126, 234, 0.3); border-top-color: #667eea; border-radius: 50%; animation: spin 1s linear infinite; }
+.wait-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255, 255, 255, 0.95); z-index: 500; display: flex; align-items: center; justify-content: center; border-radius: 16px; opacity: 1; transition: opacity 0.5s ease-out, visibility 0.5s; }
+.wait-overlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.wait-content { text-align: center; width: 80%; max-width: 400px; }
+.wait-video { width: 100%; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.1); margin-bottom: 16px; }
 
-  .message {
-    margin-bottom: 16px;
-    display: flex;
-    gap: 10px;
-  }
+/* フローティングボタンの配置 */
+.floating-buttons { 
+  position: fixed; 
+  bottom: 20px; 
+  right: 20px; 
+  display: flex; 
+  gap: 12px; 
+  z-index: 10000;
+  pointer-events: none;
+}
+.floating-buttons > * { pointer-events: auto; }
 
-  .message.assistant {
-    flex-direction: row;
-  }
+.btn-floating { 
+  width: 56px; 
+  height: 56px; 
+  border-radius: 50%; 
+  border: none; 
+  font-size: 24px; 
+  cursor: pointer; 
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); 
+  transition: transform 0.2s, box-shadow 0.2s; 
+  display: flex; 
+  align-items: center; 
+  justify-content: center; 
+}
+.btn-floating:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); }
 
-  .message.user {
-    flex-direction: row-reverse;
-  }
+.btn-reservation-float {
+  width: auto;
+  min-width: 120px;
+  height: 56px;
+  padding: 0 20px;
+  border-radius: 28px;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.btn-reservation-float.visible { opacity: 1; pointer-events: auto; }
+.btn-reservation-float:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(245, 158, 11, 0.4); }
 
-  .message.system {
-    justify-content: center;
-  }
+.btn-speaker-float { 
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%); 
+  color: white; 
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  transition: all 0.2s ease;
+}
+.btn-speaker-float .speaker-icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  transition: all 0.3s ease;
+}
+.btn-speaker-float:not(.disabled) .speaker-icon {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'/%3E%3C/svg%3E");
+}
+.btn-speaker-float.disabled { 
+  background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%); 
+  box-shadow: 0 4px 12px rgba(107, 114, 128, 0.3);
+  opacity: 0.7;
+}
+.btn-speaker-float.disabled .speaker-icon {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73 4.27 3zM12 4L9.91 6.09 12 8.18V4z'/%3E%3C/svg%3E");
+}
 
-  .message-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-    flex-shrink: 0;
-  }
+.btn-stop { 
+  background: linear-gradient(135deg, #ff3b30 0%, #d32f2f 100%); 
+  color: white;
+  position: relative;
+}
+.btn-stop img { width: 24px; height: 24px; display: none; }
+.btn-stop::before {
+  content: '';
+  width: 20px;
+  height: 20px;
+  background: white;
+  border-radius: 3px;
+  display: block;
+}
 
-  .message.assistant .message-avatar {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-  }
+.btn-mic-float { 
+  background: linear-gradient(135deg, #e8eef7 0%, #d4dce9 100%); 
+  color: white; 
+  position: relative; 
+  overflow: visible;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), inset 0 -2px 4px rgba(0, 0, 0, 0.1);
+}
+.btn-mic-float:disabled { cursor: not-allowed; opacity: 0.6; }
+.btn-mic-float img { 
+  width: 56px; 
+  height: 56px; 
+  transition: opacity 0.3s;
+  filter: brightness(0) saturate(100%) invert(68%) sepia(8%) saturate(438%) hue-rotate(182deg) brightness(93%) contrast(88%);
+}
+.btn-mic-float .icon-mic { display: block; }
+.btn-mic-float .icon-stop { display: none; }
+.btn-mic-float.recording { 
+  background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
+  box-shadow: 0 4px 20px rgba(74, 144, 226, 0.4), inset 0 -2px 4px rgba(0, 0, 0, 0.2);
+}
+.btn-mic-float.recording img {
+  filter: brightness(0) saturate(100%) invert(100%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(100%) contrast(100%);
+}
+.btn-mic-float.recording .icon-mic { display: none; }
+.btn-mic-float.recording .icon-stop { display: block; }
+.btn-mic-float.recording::before,
+.btn-mic-float.recording::after { 
+  content: ''; 
+  position: absolute; 
+  width: 100%; 
+  height: 100%; 
+  border-radius: 50%; 
+  border: 3px solid rgba(74, 144, 226, 0.6); 
+  opacity: 0; 
+  top: 0; 
+  left: 0; 
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.btn-mic-float.recording::before { animation: ripple 2s ease-out infinite; }
+.btn-mic-float.recording::after { animation: ripple 2s ease-out infinite 0.6s; }
+@keyframes ripple { 
+  0% { transform: scale(1); opacity: 0.6; border-width: 3px; } 
+  50% { opacity: 0.3; border-width: 2px; }
+  100% { transform: scale(2.2); opacity: 0; border-width: 1px; } 
+}
 
-  .message.user .message-avatar {
-    background: #e0e7ff;
-    color: #667eea;
-  }
+@media (max-width: 768px) { 
+  .floating-buttons { bottom: 80px; right: 16px; gap: 8px; }
+  .btn-floating { width: 52px; height: 52px; }
+  .btn-reservation-float { min-width: 100px; height: 52px; padding: 0 16px; font-size: 13px; }
+  .btn-speaker-float .speaker-icon { width: 22px; height: 22px; }
+  .btn-mic-float img { width: 52px; height: 52px; }
+}
 
-  .message.system .message-avatar {
-    background: #fff3e0;
-    color: #f57c00;
-  }
-
-  .message-content {
-    max-width: 70%;
-    padding: 10px 14px;
-    border-radius: 12px;
-    line-height: 1.5;
-    font-size: 14px;
-    white-space: pre-wrap;
-  }
-
-  .message.assistant .message-content {
-    background: white;
-    border: 1px solid #e5e7eb;
-    color: #1f2937;
-  }
-
-  .message.user .message-content {
-    background: #667eea;
-    color: white;
-  }
-
-  .message.system .message-content {
-    background: #fff3e0;
-    color: #e65100;
-    font-size: 12px;
-  }
-
-  .summary-box {
-    margin-top: 10px;
-    padding: 10px;
-    background: #fef3c7;
-    border-left: 4px solid #f59e0b;
-    border-radius: 8px;
-    font-size: 13px;
-    color: #92400e;
-  }
-
-  .summary-box strong {
-    display: block;
-    margin-bottom: 6px;
-    color: #78350f;
-  }
-
-  .final-summary {
-    margin: 16px 0;
-    padding: 16px;
-    background: white;
-    border: 2px solid #10b981;
-    border-radius: 12px;
-  }
-
-  .final-summary h3 {
-    color: #065f46;
-    margin: 0 0 10px 0;
-    font-size: 16px;
-  }
-
-  .final-summary-content {
-    white-space: pre-wrap;
-    line-height: 1.7;
-    color: #1f2937;
-    font-size: 13px;
-  }
-
-  .input-area {
-    padding: 16px;
-    background: white;
-    border-top: 1px solid #e5e7eb;
-  }
-
-  .input-group {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    margin-bottom: 10px;
-  }
-
-  #userInput {
-    flex: 1;
-    padding: 10px 14px;
-    border: 2px solid #e5e7eb;
-    border-radius: 20px;
-    font-size: 14px;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-
-  #userInput:focus {
-    border-color: #667eea;
-  }
-
-  .btn {
-    padding: 10px 16px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    border: none;
-    border-radius: 20px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: transform 0.2s, box-shadow 0.2s;
-  }
-
-  .btn:hover:not(:disabled) {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-  }
-
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    background: #f3f4f6;
-    color: #374151;
-    font-size: 12px;
-    padding: 8px 12px;
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    background: #e5e7eb;
-    box-shadow: none;
-    transform: none;
-  }
-
-  .btn-reservation {
-    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-    color: white;
-    font-size: 13px;
-    padding: 10px 16px;
-    font-weight: 600;
-    box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
-  }
-
-  .btn-reservation:hover:not(:disabled) {
-    box-shadow: 0 6px 16px rgba(245, 158, 11, 0.4);
-    transform: translateY(-1px);
-  }
-
-  .btn-reservation:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-icon {
-    padding: 10px;
-    width: 40px;
-    height: 40px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .btn-mic {
-    background: #10b981;
-  }
-
-  .btn-mic:hover:not(:disabled) {
-    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
-  }
-
-  .btn-mic.recording {
-    background: #ef4444;
-    animation: pulse-btn 1.5s infinite;
-  }
-
-  @keyframes pulse-btn {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.7; }
-  }
-
-  .btn-speaker {
-    background: #f59e0b;
-  }
-
-  .btn-speaker:hover:not(:disabled) {
-    box-shadow: 0 4px 12px rgba(245, 158, 11, 0.4);
-  }
-
-  .btn-speaker.disabled {
-    background: #9ca3af;
-  }
-
-  .input-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .loading {
-    display: inline-block;
-    width: 20px;
-    height: 20px;
-    border: 3px solid #e5e7eb;
-    border-radius: 50%;
-    border-top-color: #667eea;
-    animation: spin 1s ease-in-out infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .error-message {
-    background: #fee2e2;
-    color: #b91c1c;
-    padding: 10px;
-    border-radius: 8px;
-    margin: 10px 0;
-    font-size: 13px;
-    text-align: center;
-  }
-
-  /* クリックプロンプト */
-  .click-prompt {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: rgba(0, 0, 0, 0.8);
-    color: white;
-    padding: 20px;
-    border-radius: 12px;
-    text-align: center;
-    z-index: 100;
-    cursor: pointer;
-  }
-
-  .click-prompt p {
-    margin: 5px 0;
-  }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 </style>
 
-<!-- Socket.IO クライアントライブラリ（WebSocket Streaming STT用） -->
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
 <script>
-  // グルメチャット機能
+  import { ChatController } from '../scripts/chat/chat-controller';
   document.addEventListener('DOMContentLoaded', () => {
     const container = document.querySelector('.gourmet-chat-container') as HTMLElement;
-    if (!container) return;
-
-    const apiBase = container.dataset.apiBase || '';
-    
-    // DOM要素
-    const chatArea = document.getElementById('chatArea')!;
-    const userInput = document.getElementById('userInput') as HTMLInputElement;
-    const sendBtn = document.getElementById('sendBtn') as HTMLButtonElement;
-    const micBtn = document.getElementById('micBtn') as HTMLButtonElement;
-    const speakerBtn = document.getElementById('speakerBtn') as HTMLButtonElement;
-    const reservationBtn = document.getElementById('reservationBtn') as HTMLButtonElement;
-    const voiceStatus = document.getElementById('voiceStatus')!;
-
-    // 状態
-    let sessionId: string | null = null;
-    let isProcessing = false;
-    let currentStage = 'conversation';
-    let isRecording = false;
-    let mediaRecorder: MediaRecorder | null = null;
-    let audioChunks: Blob[] = [];
-    let recordingTimer: number | null = null;
-    const MAX_RECORDING_TIME = 55000; // 55秒（APIの60秒制限より短く設定）
-    let isTTSEnabled = true;
-    let currentAudio: HTMLAudioElement | null = null;
-    let isUserInteracted = false;
-    let currentShops: any[] = []; // 現在表示中のショップリスト
-    let isFromVoiceInput = false; // 音声入力からの送信かどうかを追跡
-
-    // 事前生成音声（案1: 高速応答用）
-    let preGeneratedAcks: Map<string, string> = new Map(); // key: テキスト, value: base64 MP3
-
-    // 無音検出用
-    let audioContext: AudioContext | null = null;
-    let analyser: AnalyserNode | null = null;
-    let silenceTimer: number | null = null;
-    let vadCheckInterval: number | null = null;
-    let hasSpoken = false; // 音声が検出されたかどうか
-    let recordingStartTime = 0; // 録音開始時刻
-    const SILENCE_THRESHOLD = 35; // 無音判定の閾値（0-255）※環境ノイズを無視
-    const SILENCE_DURATION = 2000; // 無音が続いたら停止するミリ秒（2秒）
-    const MIN_RECORDING_TIME = 3000; // 最小録音時間（3秒）- マイク初期化音を無視
-
-    // WebSocket Streaming STT用（案2: 完全実装）
-    let socket: any = null;
-    let audioWorkletNode: AudioWorkletNode | null = null;
-    let streamingTranscript = ''; // リアルタイム認識結果
-    let isStreamingSTT = false; // Streaming STT使用フラグ
-
-    // ユーザーインタラクション検出
-    function enableAudioPlayback() {
-      if (!isUserInteracted) {
-        isUserInteracted = true;
-        const clickPrompt = container.querySelector('.click-prompt');
-        if (clickPrompt) clickPrompt.remove();
-      }
+    if (container) {
+      const apiBase = container.dataset.apiBase || '';
+      new ChatController(container, apiBase);
     }
-
-    // クリックプロンプト表示
-    function showClickPrompt() {
-      const prompt = document.createElement('div');
-      prompt.className = 'click-prompt';
-      prompt.innerHTML = `
-        <p>&#128266;</p>
-        <p>音声を再生するには、画面をクリックしてください</p>
-        <p>&#128266;</p>
-      `;
-      prompt.addEventListener('click', enableAudioPlayback);
-      container.style.position = 'relative';
-      container.appendChild(prompt);
-    }
-
-    // 音声停止
-    function stopCurrentAudio() {
-      if (currentAudio) {
-        currentAudio.pause();
-        currentAudio.src = '';
-        currentAudio = null;
-      }
-    }
-
-    // マークダウン記号を除去（TTS用）
-    function stripMarkdown(text: string): string {
-      return text
-        // **太字** や *斜体* を除去
-        .replace(/\*\*([^*]+)\*\*/g, '$1')
-        .replace(/\*([^*]+)\*/g, '$1')
-        // __太字__ や _斜体_ を除去
-        .replace(/__([^_]+)__/g, '$1')
-        .replace(/_([^_]+)_/g, '$1')
-        // # 見出し を除去
-        .replace(/^#+\s*/gm, '')
-        // [リンクテキスト](URL) を リンクテキスト に
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-        // `コード` を除去
-        .replace(/`([^`]+)`/g, '$1')
-        // 番号リストの番号を読みやすく
-        .replace(/^(\d+)\.\s+/gm, '$1番目、')
-        // 余分な空白を整理
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
-
-    // GCP TTS音声合成
-    async function speakTextGCP(text: string, stopPrevious: boolean = true) {
-      console.log('[TTS] speakTextGCP 呼び出し:', text.substring(0, 50) + '...', '文字数:', text.length);
-
-      if (!isTTSEnabled || !text) return;
-
-      if (stopPrevious) {
-        stopCurrentAudio();
-      }
-
-      // マークダウン記号を除去
-      const cleanText = stripMarkdown(text);
-      
-      console.log('[TTS] cleanText:', cleanText.substring(0, 50) + '...', '文字数:', cleanText.length);
-
-      try {
-        voiceStatus.innerHTML = '&#128266; 音声合成中...';
-        voiceStatus.className = 'voice-status speaking';
-
-        const response = await fetch(`${apiBase}/api/tts/synthesize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: cleanText,
-            language_code: 'ja-JP',
-            voice_name: 'ja-JP-Chirp3-HD-Leda'
-          })
-        });
-
-        const data = await response.json();
-        
-        console.log('[TTS] API レスポンス受信:', data.success);
-
-        if (data.success && data.audio) {
-          const audio = new Audio(`data:audio/mp3;base64,${data.audio}`);
-          currentAudio = audio;
-          
-          console.log('[TTS] 音声再生開始');
-
-          // 音声再生完了を待つPromiseを作成
-          const playPromise = new Promise<void>((resolve) => {
-            audio.onended = () => {
-              console.log('[TTS] 音声再生完了');
-              voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-              voiceStatus.className = 'voice-status stopped';
-              currentAudio = null;
-              resolve();
-            };
-
-            audio.onerror = () => {
-              console.log('[TTS] 音声再生エラー');
-              voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-              voiceStatus.className = 'voice-status stopped';
-              resolve();
-            };
-          });
-
-          if (isUserInteracted) {
-            await audio.play();
-            await playPromise; // 再生完了を待つ
-          } else {
-            showClickPrompt();
-            voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-            voiceStatus.className = 'voice-status stopped';
-          }
-        }
-      } catch (error) {
-        console.error('[TTS] Error:', error);
-        voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-        voiceStatus.className = 'voice-status stopped';
-      }
-    }
-
-    // 無音検出の停止
-    function stopVAD() {
-      if (vadCheckInterval) {
-        clearInterval(vadCheckInterval);
-        vadCheckInterval = null;
-      }
-      if (silenceTimer) {
-        clearTimeout(silenceTimer);
-        silenceTimer = null;
-      }
-      if (audioContext) {
-        audioContext.close();
-        audioContext = null;
-      }
-      analyser = null;
-      hasSpoken = false;
-    }
-
-    // 無音検出によるオートストップ
-    function autoStopRecording() {
-      console.log('[VAD] 無音検出 - 自動停止');
-      stopVAD();
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      }
-      if (recordingTimer) {
-        clearTimeout(recordingTimer);
-        recordingTimer = null;
-      }
-      isRecording = false;
-      micBtn.classList.remove('recording');
-      micBtn.innerHTML = '&#127908;';
-    }
-
-    // 録音切り替え（案2: WebSocket Streaming STT対応）
-    async function toggleRecording() {
-      enableAudioPlayback();
-      stopCurrentAudio();
-
-      if (isRecording) {
-        // 録音停止
-        stopStreamingSTT();
-        return;
-      }
-
-      // WebSocket Streaming STT が有効な場合は使用、無効な場合はフォールバック
-      if (isStreamingSTT) {
-        await startStreamingSTT();
-      } else {
-        // フォールバック: 従来のMediaRecorder方式
-        console.warn('[Recording] WebSocket未接続、フォールバック使用');
-        await startLegacyRecording();
-      }
-    }
-
-    // WebSocket Streaming STT開始
-    async function startStreamingSTT() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 16000,  // 16kHz (Google Cloud STT推奨)
-            echoCancellation: true,
-            noiseSuppression: true
-          }
-        });
-
-        // AudioContext作成（16kHz）
-        audioContext = new AudioContext({ sampleRate: 16000 });
-        const source = audioContext.createMediaStreamSource(stream);
-
-        // AudioWorklet読み込み
-        await audioContext.audioWorklet.addModule('/audio-processor.js');
-
-        // AudioWorkletNode作成
-        audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
-
-        // PCMチャンクをWebSocket経由で送信
-        let chunkCount = 0;
-        audioWorkletNode.port.onmessage = (event) => {
-          const { audioChunk } = event.data;
-
-          // Int16Array をbase64エンコード
-          const uint8Array = new Uint8Array(audioChunk.buffer);
-          const base64 = btoa(String.fromCharCode.apply(null, Array.from(uint8Array)));
-
-          // WebSocket送信
-          if (socket && socket.connected) {
-            socket.emit('audio_chunk', { chunk: base64 });
-            chunkCount++;
-            if (chunkCount % 10 === 0) {
-              console.log(`[Audio] チャンク送信: ${chunkCount}個 (${audioChunk.length} samples)`);
-            }
-          } else {
-            console.error('[Audio] WebSocket未接続 - チャンク送信失敗');
-          }
-        };
-
-        // 音声フロー接続
-        source.connect(audioWorkletNode);
-        audioWorkletNode.connect(audioContext.destination);
-
-        // VADセットアップ（無音検出）
-        analyser = audioContext.createAnalyser();
-        analyser.fftSize = 512;
-        source.connect(analyser);
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        hasSpoken = false;
-        recordingStartTime = Date.now(); // 録音開始時刻を記録
-
-        vadCheckInterval = window.setInterval(() => {
-          if (!analyser || !isRecording) return;
-
-          // 最小録音時間に達していない場合はスキップ
-          const elapsed = Date.now() - recordingStartTime;
-          if (elapsed < MIN_RECORDING_TIME) {
-            return;
-          }
-
-          analyser.getByteFrequencyData(dataArray);
-          const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-
-          if (average > SILENCE_THRESHOLD) {
-            hasSpoken = true;
-            if (silenceTimer) {
-              clearTimeout(silenceTimer);
-              silenceTimer = null;
-            }
-            voiceStatus.innerHTML = '&#127908; 録音中...';
-          } else if (hasSpoken && !silenceTimer) {
-            voiceStatus.innerHTML = '&#127908; 認識待機中...';
-            silenceTimer = window.setTimeout(() => {
-              console.log('[VAD] 無音検出 - 自動停止');
-              stopStreamingSTT();
-            }, SILENCE_DURATION);
-          }
-        }, 100);
-
-        // WebSocketストリーム開始通知
-        socket.emit('start_stream', { language_code: 'ja-JP' });
-
-        isRecording = true;
-        micBtn.classList.add('recording');
-        micBtn.innerHTML = '&#9209;';
-        voiceStatus.innerHTML = '&#127908; 話してください...';
-        voiceStatus.className = 'voice-status listening';
-
-        console.log('[WebSocket STT] ストリーミング録音開始');
-
-        // 55秒後に自動停止
-        recordingTimer = window.setTimeout(() => {
-          if (isRecording) {
-            console.log('[Recording] 最大録音時間に達したため自動停止');
-            stopStreamingSTT();
-            addMessage('system', '録音時間が上限（55秒）に達したため自動停止しました');
-          }
-        }, MAX_RECORDING_TIME);
-
-      } catch (error) {
-        console.error('[WebSocket STT] 録音開始エラー:', error);
-        addMessage('system', `マイクアクセスエラー: ${(error as Error).message}`);
-      }
-    }
-
-    // WebSocket Streaming STT停止
-    function stopStreamingSTT() {
-      // VAD停止
-      stopVAD();
-
-      // AudioWorklet停止
-      if (audioWorkletNode) {
-        audioWorkletNode.disconnect();
-        audioWorkletNode = null;
-      }
-
-      // AudioContext停止
-      if (audioContext) {
-        audioContext.close();
-        audioContext = null;
-      }
-
-      // WebSocketストリーム停止通知
-      if (socket && socket.connected) {
-        socket.emit('stop_stream');
-      }
-
-      // タイマー停止
-      if (recordingTimer) {
-        clearTimeout(recordingTimer);
-        recordingTimer = null;
-      }
-
-      isRecording = false;
-      micBtn.classList.remove('recording');
-      micBtn.innerHTML = '&#127908;';
-
-      console.log('[WebSocket STT] ストリーミング録音停止');
-    }
-
-    // フォールバック: 従来のMediaRecorder方式
-    async function startLegacyRecording() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-
-        audioChunks = [];
-        hasSpoken = false;
-        recordingStartTime = Date.now(); // 録音開始時刻を記録
-
-        // 無音検出のセットアップ
-        audioContext = new AudioContext();
-        const source = audioContext.createMediaStreamSource(stream);
-        analyser = audioContext.createAnalyser();
-        analyser.fftSize = 512;
-        source.connect(analyser);
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-        vadCheckInterval = window.setInterval(() => {
-          if (!analyser || !isRecording) return;
-
-          // 最小録音時間に達していない場合はスキップ
-          const elapsed = Date.now() - recordingStartTime;
-          if (elapsed < MIN_RECORDING_TIME) {
-            return;
-          }
-
-          analyser.getByteFrequencyData(dataArray);
-          const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-
-          if (average > SILENCE_THRESHOLD) {
-            hasSpoken = true;
-            if (silenceTimer) {
-              clearTimeout(silenceTimer);
-              silenceTimer = null;
-            }
-            voiceStatus.innerHTML = '&#127908; 録音中...';
-          } else if (hasSpoken && !silenceTimer) {
-            voiceStatus.innerHTML = '&#127908; 認識待機中...';
-            silenceTimer = window.setTimeout(() => {
-              autoStopRecording();
-            }, SILENCE_DURATION);
-          }
-        }, 100);
-
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            audioChunks.push(event.data);
-          }
-        };
-
-        mediaRecorder.onstop = async () => {
-          stopVAD();
-          stream.getTracks().forEach(track => track.stop());
-
-          if (recordingTimer) {
-            clearTimeout(recordingTimer);
-            recordingTimer = null;
-          }
-
-          if (audioChunks.length > 0) {
-            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-            await transcribeAudio(audioBlob);
-          }
-        };
-
-        mediaRecorder.start();
-        isRecording = true;
-        micBtn.classList.add('recording');
-        micBtn.innerHTML = '&#9209;';
-        voiceStatus.innerHTML = '&#127908; 話してください...';
-        voiceStatus.className = 'voice-status listening';
-
-        recordingTimer = window.setTimeout(() => {
-          if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
-            console.log('[Recording] 最大録音時間に達したため自動停止');
-            stopVAD();
-            mediaRecorder.stop();
-            isRecording = false;
-            micBtn.classList.remove('recording');
-            micBtn.innerHTML = '&#127908;';
-            addMessage('system', '録音時間が上限（55秒）に達したため自動停止しました');
-          }
-        }, MAX_RECORDING_TIME);
-
-      } catch (error) {
-        console.error('[Recording] Error:', error);
-        addMessage('system', `マイクアクセスエラー: ${(error as Error).message}`);
-      }
-    }
-
-    // 音声認識
-    async function transcribeAudio(audioBlob: Blob) {
-      try {
-        voiceStatus.innerHTML = '&#128260; 音声認識中...';
-        voiceStatus.className = 'voice-status';
-
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-
-        reader.onloadend = async () => {
-          const base64Audio = (reader.result as string).split(',')[1];
-
-          // 一時的にバッチSTTに戻す（動作確認用）
-          const response = await fetch(`${apiBase}/api/stt/transcribe`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              audio: base64Audio,
-              language_code: 'ja-JP'
-            })
-          });
-
-          const data = await response.json();
-
-          if (data.success && data.transcript) {
-            userInput.value = data.transcript;
-            voiceStatus.innerHTML = '&#9989; 認識完了';
-            voiceStatus.className = 'voice-status';
-
-            // ユーザーメッセージを追加
-            addMessage('user', data.transcript);
-
-            // 第1段階：即答
-            const ack = selectSmartAcknowledgment(data.transcript);
-            console.log(`[即答] ${ack.logText}`);
-
-            const preGeneratedAudio = preGeneratedAcks.get(ack.text);
-            if (preGeneratedAudio && isTTSEnabled && isUserInteracted) {
-              // 事前生成音声を即座に再生（TTSリクエスト不要！）
-              const audio = new Audio(`data:audio/mp3;base64,${preGeneratedAudio}`);
-              currentAudio = audio;
-
-              audio.onended = () => {
-                currentAudio = null;
-              };
-
-              audio.play().catch(err => {
-                console.error('[即答] 音声再生エラー:', err);
-              });
-
-              console.log(`[即答] 事前生成音声を再生: "${ack.text}"`);
-            } else if (isTTSEnabled) {
-              // フォールバック: 事前生成がない場合はその場で生成
-              console.log(`[即答] フォールバック: その場で生成 "${ack.text}"`);
-              speakTextGCP(ack.text, false);
-            }
-
-            // チャットに即答メッセージを追加
-            addMessage('assistant', ack.text);
-
-            // 第2段階：シンプルなオウム返し応答
-            const fallbackResponse = generateFallbackResponse(data.transcript);
-            if (isTTSEnabled && isUserInteracted) {
-              await speakTextGCP(fallbackResponse, false);
-            }
-            addMessage('assistant', fallbackResponse);
-
-            // 3秒後に追加の応答を再生
-            setTimeout(async () => {
-              const additionalResponse = "只今、お店の情報を確認中です。もう少々お待ちください。";
-              if (isTTSEnabled && isUserInteracted) {
-                await speakTextGCP(additionalResponse, false);
-              }
-              addMessage('assistant', additionalResponse);
-            }, 3000);
-
-            // 並列でメッセージ送信（待たない）
-            if (!isRecording && userInput.value.trim()) {
-              isFromVoiceInput = true; // フラグをセット
-              sendMessage(); // awaitしない = 並列実行
-            }
-
-            voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-            voiceStatus.className = 'voice-status stopped';
-          } else {
-            voiceStatus.innerHTML = '音声が認識されませんでした';
-          }
-        };
-
-      } catch (error) {
-        console.error('[STT] Error:', error);
-        addMessage('system', `音声認識エラー: ${(error as Error).message}`);
-        voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-        voiceStatus.className = 'voice-status stopped';
-      }
-    }
-
-    // スマート即答選択（案3: test_voice_conversation.py準拠）
-    function selectSmartAcknowledgment(userMessage: string): { text: string, logText: string } {
-      const messageLower = userMessage.trim();
-
-      // 質問形式（明確な疑問文）
-      if (/ございますか|でしょうか|いかがですか|ありますか/.test(messageLower)) {
-        return {
-          text: "確認しますので、少々お待ちください。",
-          logText: "質問形式 → 「確認しますので、少々お待ちください。」"
-        };
-      }
-
-      // 場所・エリアの質問
-      if (/どこ|場所|エリア|地域|駅/.test(messageLower)) {
-        return {
-          text: "お調べします。",
-          logText: "場所の質問 → 「お調べします。」"
-        };
-      }
-
-      // 検索・探す
-      if (/探して|探し|教えて|おすすめ|紹介/.test(messageLower)) {
-        return {
-          text: "かしこまりました。",
-          logText: "検索依頼 → 「かしこまりました。」"
-        };
-      }
-
-      // デフォルト: シンプルな確認
-      return {
-        text: "はい、承知しました。",
-        logText: "デフォルト → 「はい、承知しました。」"
-      };
-    }
-
-    // TTS切り替え
-    function toggleTTS() {
-      if (!isUserInteracted) {
-        enableAudioPlayback();
-        return;
-      }
-
-      enableAudioPlayback();
-      isTTSEnabled = !isTTSEnabled;
-      speakerBtn.innerHTML = isTTSEnabled ? '&#128266;' : '&#128263;';
-      speakerBtn.title = isTTSEnabled ? '音声読み上げON' : '音声読み上げOFF';
-      speakerBtn.className = isTTSEnabled ? 'btn btn-icon btn-speaker' : 'btn btn-icon btn-speaker disabled';
-
-      if (!isTTSEnabled) {
-        stopCurrentAudio();
-      }
-    }
-
-    // シンプルなオウム返し応答
-    function generateFallbackResponse(text: string): string {
-      return `"${text}"とのこと。お調べしますので、少々お待ちください。`;
-    }
-
-    // 初期化
-    async function initialize() {
-      try {
-        const response = await fetch(`${apiBase}/api/session/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_info: {} })
-        });
-
-        const data = await response.json();
-        sessionId = data.session_id;
-
-        addMessage('assistant', data.initial_message);
-
-        // 案1: 即答用音声を事前生成（並列実行）
-        console.log('[初期化] 即答用音声を事前生成中...');
-        const ackTexts = [
-          "確認しますので、少々お待ちください。",
-          "お調べします。",
-          "かしこまりました。",
-          "はい、承知しました。",
-          "ご希望に合うお店を5件ご紹介します。",
-          "ご希望に合うお店を3件ご紹介します。",
-          "ご希望に合うお店をご紹介します。"
-        ];
-
-        const ackPromises = ackTexts.map(async (text) => {
-          try {
-            const ackResponse = await fetch(`${apiBase}/api/tts/synthesize`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                text: text,
-                language_code: 'ja-JP',
-                voice_name: 'ja-JP-Chirp3-HD-Leda'
-              })
-            });
-            const ackData = await ackResponse.json();
-            if (ackData.success && ackData.audio) {
-              preGeneratedAcks.set(text, ackData.audio);
-              console.log(`[初期化] ? 事前生成完了: "${text}"`);
-            }
-          } catch (error) {
-            console.error(`[初期化] 事前生成失敗: "${text}"`, error);
-          }
-        });
-
-        // 初期メッセージのTTSと並列実行
-        await Promise.all([
-          speakTextGCP(data.initial_message),
-          ...ackPromises
-        ]);
-
-        userInput.disabled = false;
-        sendBtn.disabled = false;
-        micBtn.disabled = false;
-        speakerBtn.disabled = false;
-        userInput.focus();
-
-        console.log(`[初期化] 完了 (事前生成音声: ${preGeneratedAcks.size}件)`);
-
-        // 案2: WebSocket Streaming STT接続を初期化
-        initializeWebSocketSTT();
-
-      } catch (error) {
-        console.error('初期化エラー:', error);
-        showError('初期化に失敗しました。ページを再読み込みしてください。');
-      }
-    }
-
-    // WebSocket Streaming STT接続初期化（案2: 完全実装）
-    function initializeWebSocketSTT() {
-      try {
-        // Socket.IO接続（apiBaseからWebSocketサーバーURLを生成）
-        const wsUrl = apiBase || window.location.origin;
-        socket = io(wsUrl);
-
-        socket.on('connect', () => {
-          console.log('[WebSocket STT] 接続成功');
-          isStreamingSTT = true;
-        });
-
-        socket.on('disconnect', () => {
-          console.log('[WebSocket STT] 切断');
-          isStreamingSTT = false;
-        });
-
-        socket.on('connected', (data: any) => {
-          console.log('[WebSocket STT] サーバー準備完了:', data);
-        });
-
-        socket.on('stream_started', (data: any) => {
-          console.log('[WebSocket STT] ストリーム開始:', data);
-        });
-
-        socket.on('transcript', (data: any) => {
-          // リアルタイム認識結果
-          const { text, is_final, confidence } = data;
-
-          if (is_final) {
-            // 最終結果: ユーザー入力として確定
-            console.log(`[WebSocket STT] 最終認識: "${text}" (信頼度: ${confidence.toFixed(2)})`);
-            streamingTranscript = text;
-
-            // 音声認識完了処理
-            handleStreamingSTTComplete(text);
-          } else {
-            // 途中結果: リアルタイム表示
-            console.log(`[WebSocket STT] 途中認識: "${text}"`);
-            userInput.value = text; // リアルタイムで入力欄に表示
-          }
-        });
-
-        socket.on('stream_stopped', (data: any) => {
-          console.log('[WebSocket STT] ストリーム停止:', data);
-        });
-
-        socket.on('error', (data: any) => {
-          console.error('[WebSocket STT] エラー:', data.message);
-          addMessage('system', `音声認識エラー: ${data.message}`);
-        });
-
-      } catch (error) {
-        console.error('[WebSocket STT] 初期化エラー:', error);
-        isStreamingSTT = false;
-      }
-    }
-
-    // WebSocket Streaming STT完了処理
-    function handleStreamingSTTComplete(transcript: string) {
-      // まずストリーミングを完全停止
-      stopStreamingSTT();
-      
-      voiceStatus.innerHTML = '? 認識完了';
-      voiceStatus.className = 'voice-status';
-
-      // 入力欄に認識結果を設定
-      userInput.value = transcript;
-
-      // ユーザーメッセージを追加
-      addMessage('user', transcript);
-
-      // 第1段階：即答
-      const ack = selectSmartAcknowledgment(transcript);
-      console.log(`[即答] ${ack.logText}`);
-
-      const preGeneratedAudio = preGeneratedAcks.get(ack.text);
-      let firstAckPromise: Promise<void> | null = null;
-
-      if (preGeneratedAudio && isTTSEnabled && isUserInteracted) {
-        // 事前生成音声を即座に再生(TTSリクエスト不要!)
-        firstAckPromise = new Promise<void>((resolve) => {
-          const audio = new Audio(`data:audio/mp3;base64,${preGeneratedAudio}`);
-          currentAudio = audio;
-
-          audio.onended = () => {
-            currentAudio = null;
-            resolve();
-          };
-
-          audio.play().catch(err => {
-            console.error('[即答] 音声再生エラー:', err);
-            resolve();
-          });
-        });
-        console.log(`[即答] 事前生成音声を再生: "${ack.text}"`);
-      } else if (isTTSEnabled) {
-        // フォールバック: 事前生成がない場合はその場で生成
-        console.log(`[即答] フォールバック: その場で生成 "${ack.text}"`);
-        firstAckPromise = speakTextGCP(ack.text, false);
-      }
-
-      // チャットに即答メッセージを追加
-      addMessage('assistant', ack.text);
-
-      // 録音を停止
-      stopStreamingSTT();
-
-      // 第2段階：シンプルなオウム返し応答
-      (async () => {
-        try {
-          // 第1段階の即答が終わるのを待つ
-          if (firstAckPromise) {
-            await firstAckPromise;
-          }
-
-          // シンプルなオウム返し応答
-          const fallbackResponse = generateFallbackResponse(transcript);
-          console.log(`[フォールバック応答] "${transcript}" → "${fallbackResponse}"`);
-
-          if (isTTSEnabled && isUserInteracted) {
-            await speakTextGCP(fallbackResponse, false);
-          }
-          addMessage('assistant', fallbackResponse);
-
-          // 5秒後に追加の応答を再生
-          setTimeout(async () => {
-            const additionalResponse = "只今、お店の情報を確認中です。もう少々お待ちください。";
-            if (isTTSEnabled && isUserInteracted) {
-              await speakTextGCP(additionalResponse, false);
-            }
-            addMessage('assistant', additionalResponse);
-          }, 5000);
-
-          // 並列でメッセージ送信
-          if (userInput.value.trim()) {
-            isFromVoiceInput = true;
-            sendMessage();
-          }
-
-        } catch (error) {
-          console.error('第2段階応答生成エラー:', error);
-          // エラー時はシンプルな応答でフォールバック
-          const fallbackResponse = generateFallbackResponse(transcript);
-          if (isTTSEnabled && isUserInteracted) {
-            await speakTextGCP(fallbackResponse, false);
-          }
-          addMessage('assistant', fallbackResponse);
-
-          if (userInput.value.trim()) {
-            isFromVoiceInput = true;
-            sendMessage();
-          }
-        }
-      })();
-
-      voiceStatus.innerHTML = '?? 音声認識: 停止中';
-      voiceStatus.className = 'voice-status stopped';
-    }
-
-    // レスポンステキストからショップ情報を抽出
-    function extractShopsFromResponse(text: string): any[] {
-      const shops: any[] = [];
-      
-      // パターン: 番号. **店名（読み）**: 説明
-      // または: 番号. **店名**: 説明
-      const pattern = /(\d+)\.\s*\*\*([^*]+)\*\*[：:]\s*([^\n]+)/g;
-      let match;
-
-      console.log('[ShopExtract] テキストからショップを抽出中...');
-
-      while ((match = pattern.exec(text)) !== null) {
-        const fullName = match[2].trim();
-        const description = match[3].trim();
-        
-        // 店名から読み仮名を分離
-        let name = fullName;
-        let reading = '';
-        
-        const nameMatch = fullName.match(/^([^（(]+)[（(]([^）)]+)[）)]/);
-        if (nameMatch) {
-          name = nameMatch[1].trim();
-          reading = nameMatch[2].trim();
-        }
-
-        // 店名をエンコードしてURLを生成
-        const encodedName = encodeURIComponent(name);
-
-        shops.push({
-          name: name,
-          description: description,
-          category: 'イタリアン',
-          // 検索用URLを生成
-          hotpepper_url: `https://www.hotpepper.jp/SA11/srchRS/?keyword=${encodedName}`,
-          maps_url: `https://www.google.com/maps/search/${encodedName}`,
-          tabelog_url: `https://tabelog.com/rstLst/?vs=1&sa=&sk=${encodedName}`
-        });
-      }
-
-      console.log(`[ShopExtract] ${shops.length}件のショップを抽出:`, shops);
-
-      return shops;
-    }
-
-    // メッセージ送信
-    async function sendMessage() {
-      let firstAckPromise: Promise<void> | null = null; // ?? 即答待機用Promise
-      
-      const message = userInput.value.trim();
-      if (!message || isProcessing) return;
-
-      isProcessing = true;
-      sendBtn.disabled = true;
-      micBtn.disabled = true;
-      userInput.disabled = true;
-
-      // テキスト送信の場合のみユーザーメッセージを追加
-      // （音声の場合はtranscribeAudio()で既にユーザーメッセージ追加済み）
-      if (!isFromVoiceInput) {
-        addMessage('user', message);
-      }
-      userInput.value = '';
-
-      // 案1: 即答は transcribeAudio() で既に再生済み（音声入力の場合）
-      // テキスト入力の場合のみここで即答を生成
-      if (!isFromVoiceInput) {
-        console.log(`[DEBUG] テキスト入力の即答処理を開始`);
-        const ack = selectSmartAcknowledgment(message);
-        console.log(`[DEBUG] 即答テキスト: "${ack.text}"`);
-
-        // チャットに即答メッセージを追加
-        addMessage('assistant', ack.text);
-
-        // 音声再生処理
-        if (isTTSEnabled) {
-          try {
-            const preGeneratedAudio = preGeneratedAcks.get(ack.text);
-            
-            if (preGeneratedAudio && isUserInteracted) {
-              console.log(`[DEBUG] 事前生成音声を再生します`);
-              // ?? 音声再生完了を待てるようにPromise化
-              firstAckPromise = new Promise<void>((resolve) => {
-                const audio = new Audio(`data:audio/mp3;base64,${preGeneratedAudio}`);
-                currentAudio = audio;
-                audio.onended = () => {
-                  console.log(`[DEBUG] 事前生成音声の再生が完了しました`);
-                  currentAudio = null;
-                  resolve();  // 再生完了を通知
-                };
-                audio.play().catch(err => {
-                  console.error('[即答] 音声再生エラー:', err);
-                  resolve();  // エラー時も続行
-                });
-              });
-            } else {
-              console.log(`[DEBUG] フォールバック音声を再生します`);
-              // フォールバック時もPromise化
-              firstAckPromise = speakTextGCP(ack.text, false);
-            }
-          } catch (error) {
-            console.error(`[DEBUG] 音声再生でエラーが発生しました:`, error);
-          }
-        }
-
-        // 第1段階の即答が終わるのを待つ
-        if (firstAckPromise) {
-          await firstAckPromise;
-        }
-
-        // 第2段階：シンプルなオウム返し応答
-        const fallbackResponse = generateFallbackResponse(message);
-        console.log(`[DEBUG] 第2段階応答: "${fallbackResponse}"`);
-        if (isTTSEnabled && isUserInteracted) {
-          await speakTextGCP(fallbackResponse, false);
-        }
-        addMessage('assistant', fallbackResponse);
-
-        // 3秒後に追加の応答を再生
-        setTimeout(async () => {
-          const additionalResponse = "只今、お店の情報を確認中です。もう少々お待ちください。";
-          console.log(`[DEBUG] 追加応答: "${additionalResponse}"`);
-          if (isTTSEnabled && isUserInteracted) {
-            await speakTextGCP(additionalResponse, false);
-          }
-          addMessage('assistant', additionalResponse);
-        }, 3000);
-      }
-
-      // フラグをリセット
-      const wasVoiceInput = isFromVoiceInput;
-      isFromVoiceInput = false;
-
-      try {
-        const loadingId = addLoadingMessage();
-
-        const response = await fetch(`${apiBase}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            session_id: sessionId,
-            message: message,
-            stage: currentStage
-          })
-        });
-
-        const data = await response.json();
-
-        removeLoadingMessage(loadingId);
-
-        // デバッグ: レスポンス内容を確認
-        console.log('[DEBUG] data.response 文字数:', data.response.length);
-        console.log('[DEBUG] data.response 内容:', data.response);
-        console.log('[DEBUG] data.summary:', data.summary);
-
-        // 本文を表示（summaryも保存するが読み上げはresponseのみ）
-        addMessage('assistant', data.response, data.summary);
-
-        // 先行TTSを停止
-        stopCurrentAudio();
-
-// ショップデータの有無で読み上げ内容を変える
-if (data.shops && data.shops.length > 0) {
-  // ショップデータを保存し、予約依頼ボタンを有効化
-  currentShops = data.shops;
-  reservationBtn.disabled = false;
-
-  // $2705 まずショップカード表示を最優先(TTS前に即座に実行)
-  const event = new CustomEvent('displayShops', {
-    detail: { shops: data.shops }
-  });
-  document.dispatchEvent(event);
-
-  // セクションにクラスを追加
-  const section = document.getElementById('shopListSection');
-  if (section) {
-    section.classList.add('has-shops');
-  }
-
-// ✅ TTSは非同期で並列実行(await しない = カード表示をブロックしない)
-(async () => {
-  try {
-    // パート1：定型文を即座に再生
-    await speakTextGCP(`お待たせしました。`);
-
-    // LLMの応答を解析して定型文と店舗情報を分離
-    const lines = data.response.split('\n\n');
-    let introText = "";
-    let shopLines = lines;
-
-    // 最初の行が定型文かチェック
-    if (lines[0].includes('ご希望に合うお店') && lines[0].includes('ご紹介します')) {
-      introText = lines[0]; // 定型文を抽出
-      shopLines = lines.slice(1); // 残りが店舗情報
-    }
-
-// パート2：定型文を事前生成音声から即時再生
-let introPart2Promise: Promise<void> | null = null;
-if (introText && isTTSEnabled && isUserInteracted) {
-  const preGeneratedIntro = preGeneratedAcks.get(introText);
-  if (preGeneratedIntro) {
-    introPart2Promise = new Promise<void>((resolve) => {
-      const audio = new Audio(`data:audio/mp3;base64,${preGeneratedIntro}`);
-      currentAudio = audio;
-      audio.onended = () => {
-        currentAudio = null;
-        resolve();
-      };
-      audio.play();
-    });
-  } else {
-    introPart2Promise = speakTextGCP(introText, false);
-  }
-}
-
-// パート3：1軒目 + 2軒目以降を並行して音声合成開始
-let firstShopAudioPromise: Promise<string | null> | null = null;
-let remainingAudioPromise: Promise<string | null> | null = null;
-
-if (shopLines.length > 0 && isTTSEnabled && isUserInteracted) {
-  const firstShop = shopLines[0];
-  const restShops = shopLines.slice(1).join('\n\n');
-
-  // ⭐ 1軒目の音声合成を即座に開始（並行処理）
-  firstShopAudioPromise = (async () => {
-    const cleanText = stripMarkdown(firstShop);
-    const response = await fetch(`${apiBase}/api/tts/synthesize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: cleanText,
-        language_code: 'ja-JP',
-        voice_name: 'ja-JP-Chirp3-HD-Leda'
-      })
-    });
-    const result = await response.json();
-    return result.success ? `data:audio/mp3;base64,${result.audio}` : null;
-  })();
-
-  // ⭐ 2軒目以降も同時に音声合成開始（並行処理）
-  if (restShops) {
-    remainingAudioPromise = (async () => {
-      const cleanText = stripMarkdown(restShops);
-      const response = await fetch(`${apiBase}/api/tts/synthesize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: cleanText,
-          language_code: 'ja-JP',
-          voice_name: 'ja-JP-Chirp3-HD-Leda'
-        })
-      });
-      const result = await response.json();
-      return result.success ? `data:audio/mp3;base64,${result.audio}` : null;
-    })();
-  }
-}
-
-// パート2の再生完了を待つ
-if (introPart2Promise) {
-  await introPart2Promise;
-}
-
-// 1軒目の音声合成完了を待って再生
-if (firstShopAudioPromise) {
-  const firstShopAudio = await firstShopAudioPromise;
-  if (firstShopAudio) {
-    stopCurrentAudio();
-    const audio = new Audio(firstShopAudio);
-    currentAudio = audio;
-    
-    // 1軒目の再生完了を待つ
-    await new Promise<void>((resolve) => {
-      audio.onended = () => {
-        currentAudio = null;
-        voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-        voiceStatus.className = 'voice-status stopped';
-        resolve();
-      };
-      
-      voiceStatus.innerHTML = '&#128266; 音声再生中...';
-      voiceStatus.className = 'voice-status speaking';
-      
-      audio.play();
-    });
-
-    // 2軒目以降の音声合成完了を待って再生
-    if (remainingAudioPromise) {
-      const remainingAudio = await remainingAudioPromise;
-      if (remainingAudio) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        stopCurrentAudio();
-        const audioElement = new Audio(remainingAudio);
-        currentAudio = audioElement;
-        
-        await new Promise<void>((resolve) => {
-          audioElement.onended = () => {
-            currentAudio = null;
-            voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-            voiceStatus.className = 'voice-status stopped';
-            resolve();
-          };
-          
-          voiceStatus.innerHTML = '&#128266; 音声再生中...';
-          voiceStatus.className = 'voice-status speaking';
-          
-          audioElement.play();
-        });
-      }
-    }
-  }
-}
-  } catch (error) {
-    console.error('[TTS] ショップ情報読み上げエラー:', error);
-  }
-})(); // ✅ 即座に実行するが、完了を待たない
-
-} else {
-  // ショップデータがない場合の処理
-  if (data.response) {
-    // レスポンスからショップ情報をパースして抽出を試みる
-    const extractedShops = extractShopsFromResponse(data.response);
-    if (extractedShops.length > 0) {
-      // ショップデータを保存し、予約依頼ボタンを有効化
-      currentShops = extractedShops;
-      reservationBtn.disabled = false;
-
-      // $2705 まずショップカード表示を最優先(TTS前に即座に実行)
-      const event = new CustomEvent('displayShops', {
-        detail: { shops: extractedShops }
-      });
-      document.dispatchEvent(event);
-
-      const section = document.getElementById('shopListSection');
-      if (section) {
-        section.classList.add('has-shops');
-      }
-// ✅ TTSは非同期で並列実行(await しない)
-(async () => {
-  try {
-    // パート1：定型文を即座に再生
-    await speakTextGCP(`お待たせしました。`);
-
-    // LLMの応答を解析して定型文と店舗情報を分離
-    const lines = data.response.split('\n\n');
-    let introText = "";
-    let shopLines = lines;
-
-    // 最初の行が定型文かチェック
-    if (lines[0].includes('ご希望に合うお店') && lines[0].includes('ご紹介します')) {
-      introText = lines[0]; // 定型文を抽出
-      shopLines = lines.slice(1); // 残りが店舗情報
-    }
-
- // パート2：定型文を事前生成音声から即時再生
-let introPart2Promise: Promise<void> | null = null;
-if (introText && isTTSEnabled && isUserInteracted) {
-  const preGeneratedIntro = preGeneratedAcks.get(introText);
-  if (preGeneratedIntro) {
-    introPart2Promise = new Promise<void>((resolve) => {
-      const audio = new Audio(`data:audio/mp3;base64,${preGeneratedIntro}`);
-      currentAudio = audio;
-      audio.onended = () => {
-        currentAudio = null;
-        resolve();
-      };
-      audio.play();
-    });
-  } else {
-    introPart2Promise = speakTextGCP(introText, false);
-  }
-}
-
-// パート3：1軒目 + 2軒目以降を並行して音声合成開始
-let firstShopAudioPromise: Promise<string | null> | null = null;
-let remainingAudioPromise: Promise<string | null> | null = null;
-
-if (shopLines.length > 0 && isTTSEnabled && isUserInteracted) {
-  const firstShop = shopLines[0];
-  const restShops = shopLines.slice(1).join('\n\n');
-
-  // ⭐ 1軒目の音声合成を即座に開始（並行処理）
-  firstShopAudioPromise = (async () => {
-    const cleanText = stripMarkdown(firstShop);
-    const response = await fetch(`${apiBase}/api/tts/synthesize`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: cleanText,
-        language_code: 'ja-JP',
-        voice_name: 'ja-JP-Chirp3-HD-Leda'
-      })
-    });
-    const result = await response.json();
-    return result.success ? `data:audio/mp3;base64,${result.audio}` : null;
-  })();
-
-  // ⭐ 2軒目以降も同時に音声合成開始（並行処理）
-  if (restShops) {
-    remainingAudioPromise = (async () => {
-      const cleanText = stripMarkdown(restShops);
-      const response = await fetch(`${apiBase}/api/tts/synthesize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: cleanText,
-          language_code: 'ja-JP',
-          voice_name: 'ja-JP-Chirp3-HD-Leda'
-        })
-      });
-      const result = await response.json();
-      return result.success ? `data:audio/mp3;base64,${result.audio}` : null;
-    })();
-  }
-}
-
-// パート2の再生完了を待つ
-if (introPart2Promise) {
-  await introPart2Promise;
-}
-
-// 1軒目の音声合成完了を待って再生
-if (firstShopAudioPromise) {
-  const firstShopAudio = await firstShopAudioPromise;
-  if (firstShopAudio) {
-    stopCurrentAudio();
-    const audio = new Audio(firstShopAudio);
-    currentAudio = audio;
-    
-    // 1軒目の再生完了を待つ
-    await new Promise<void>((resolve) => {
-      audio.onended = () => {
-        currentAudio = null;
-        voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-        voiceStatus.className = 'voice-status stopped';
-        resolve();
-      };
-      
-      voiceStatus.innerHTML = '&#128266; 音声再生中...';
-      voiceStatus.className = 'voice-status speaking';
-      
-      audio.play();
-    });
-
-    // 2軒目以降の音声合成完了を待って再生
-    if (remainingAudioPromise) {
-      const remainingAudio = await remainingAudioPromise;
-      if (remainingAudio) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        stopCurrentAudio();
-        const audioElement = new Audio(remainingAudio);
-        currentAudio = audioElement;
-        
-        await new Promise<void>((resolve) => {
-          audioElement.onended = () => {
-            currentAudio = null;
-            voiceStatus.innerHTML = '&#127908; 音声認識: 停止中';
-            voiceStatus.className = 'voice-status stopped';
-            resolve();
-          };
-          
-          voiceStatus.innerHTML = '&#128266; 音声再生中...';
-          voiceStatus.className = 'voice-status speaking';
-          
-          audioElement.play();
-        });
-      }
-    }
-  }
-}
-  } catch (error) {
-    console.error('[TTS] ショップ情報読み上げエラー:', error);
-  }
-})(); // ✅ 即座に実行するが、完了を待たない
-    } else {
-      // ショップなしの通常会話は全文読み上げ
-      speakTextGCP(data.response);
-    }
-  }
-}
-      } catch (error) {
-        console.error('送信エラー:', error);
-        showError('メッセージの送信に失敗しました。');
-      } finally {
-        isProcessing = false;
-        sendBtn.disabled = false;
-        micBtn.disabled = false;
-        userInput.disabled = false;
-        
-        // ショップカードが表示される場合はフォーカスしない
-        if (currentShops.length === 0) {
-          userInput.focus();
-        } else {
-          userInput.blur();
-        }
-      }
-    }
-
-    // 予約依頼モーダルを開く
-    function openReservationModal() {
-      if (currentShops.length === 0) {
-        showError('お店を検索してからご利用ください。');
-        return;
-      }
-
-      // カスタムイベントを発火してモーダルを開く
-      const event = new CustomEvent('openReservationModal', {
-        detail: { shops: currentShops }
-      });
-      document.dispatchEvent(event);
-    }
-
-    // メッセージ追加
-    function addMessage(role: string, content: string, summary: string | null = null) {
-      const messageDiv = document.createElement('div');
-      messageDiv.className = `message ${role}`;
-
-      const avatar = document.createElement('div');
-      avatar.className = 'message-avatar';
-      avatar.innerHTML = role === 'assistant' ? '&#127869;' : role === 'user' ? '&#128100;' : '&#9888;';
-
-      const contentDiv = document.createElement('div');
-      contentDiv.className = 'message-content';
-      contentDiv.textContent = content;
-
-      messageDiv.appendChild(avatar);
-
-      const wrapper = document.createElement('div');
-      wrapper.appendChild(contentDiv);
-
-      if (summary) {
-        const summaryDiv = document.createElement('div');
-        summaryDiv.className = 'summary-box';
-        summaryDiv.innerHTML = `<strong>&#128221; 内容確認</strong>${summary}`;
-        wrapper.appendChild(summaryDiv);
-      }
-
-      messageDiv.appendChild(wrapper);
-      chatArea.appendChild(messageDiv);
-      chatArea.scrollTop = chatArea.scrollHeight;
-    }
-
-    // ローディング表示
-    function addLoadingMessage(): string {
-      const id = 'loading-' + Date.now();
-      const messageDiv = document.createElement('div');
-      messageDiv.id = id;
-      messageDiv.className = 'message assistant';
-
-      const avatar = document.createElement('div');
-      avatar.className = 'message-avatar';
-      avatar.innerHTML = '&#127869;';
-
-      const contentDiv = document.createElement('div');
-      contentDiv.className = 'message-content';
-      contentDiv.innerHTML = `
-        <div class="loading"></div>
-        <p style="margin-top: 8px; font-size: 13px; color: #6b7280;">
-          提案するお店の情報を探しています。少々お待ちください...
-        </p>
-      `;
-
-      messageDiv.appendChild(avatar);
-      messageDiv.appendChild(contentDiv);
-      chatArea.appendChild(messageDiv);
-      chatArea.scrollTop = chatArea.scrollHeight;
-
-      return id;
-    }
-
-    function removeLoadingMessage(id: string) {
-      const element = document.getElementById(id);
-      if (element) element.remove();
-    }
-
-    // 最終要約表示
-    function showFinalSummary(summary: string) {
-      const summaryDiv = document.createElement('div');
-      summaryDiv.className = 'final-summary';
-      summaryDiv.innerHTML = `
-        <h3>&#128203; 質問要約書</h3>
-        <div class="final-summary-content">${summary}</div>
-        <p style="margin-top: 12px; font-size: 12px; color: #6b7280;">
-          担当スタッフが内容を確認し、追ってご連絡いたします。
-        </p>
-      `;
-      chatArea.appendChild(summaryDiv);
-      chatArea.scrollTop = chatArea.scrollHeight;
-    }
-
-    // エラー表示
-    function showError(message: string) {
-      const errorDiv = document.createElement('div');
-      errorDiv.className = 'error-message';
-      errorDiv.textContent = message;
-      chatArea.appendChild(errorDiv);
-      chatArea.scrollTop = chatArea.scrollHeight;
-    }
-
-    // イベントリスナー
-    sendBtn.addEventListener('click', sendMessage);
-    micBtn.addEventListener('click', toggleRecording);
-    speakerBtn.addEventListener('click', toggleTTS);
-    userInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') sendMessage();
-    });
-    reservationBtn.addEventListener('click', openReservationModal);
-
-    // 初期化実行
-    initialize();
   });
 </script>

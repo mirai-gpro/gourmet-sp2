@@ -9,12 +9,20 @@
     "preview": "astro preview"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@mkkellogg/gaussian-splats-3d": "^0.4.7",
+    "@sparkjsdev/spark": "^0.1.10",
     "@vite-pwa/astro": "^1.2.0",
     "astro": "^4.0.0",
+    "gaussian-splat-renderer-for-lam": "^0.0.9-alpha.1",
+    "gsplat": "^1.2.9",
+    "onnxruntime-web": "^1.23.2",
+    "three": "^0.182.0",
     "workbox-window": "^7.4.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.17",
+    "@types/three": "^0.182.0",
     "autoprefixer": "^10.4.22",
     "tailwindcss": "^4.1.17"
   }

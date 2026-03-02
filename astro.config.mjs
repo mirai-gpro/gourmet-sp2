@@ -1,6 +1,8 @@
-// astro.config.mjs
 import { defineConfig } from 'astro/config';
 import AstroPWA from '@vite-pwa/astro';
+
+// 開発モードかどうかの判定
+const isDev = process.env.NODE_ENV !== 'production';
 
 export default defineConfig({
   output: 'static',
@@ -9,21 +11,36 @@ export default defineConfig({
   },
   server: {
     port: 4321,
-    host: true
+    host: true,
+    // 🔴 開発中はヘッダーを空に、本番(preview)のみマルチスレッド用に有効化
+    headers: !isDev ? {} : {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    }
   },
   vite: {
     envPrefix: 'PUBLIC_',
+    optimizeDeps: {
+      // 🔴 重要: 404エラー対策。ViteがONNX Runtimeを勝手に移動させないように除外
+      exclude: ['onnxruntime-web']
+    },
     build: {
       charset: 'utf8'
-    }
+    },
+    server: {
+      // 🔴 server設定と同様に、開発中はヘッダーによるループを防止
+      headers: !isDev ? {} : {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+      },
+    },
   },
   integrations: [
     AstroPWA({
+      // 🔴 重要: 開発モードではPWAを無効化。これで無限リロードが物理的に止まります。
+      disable: isDev,
       registerType: 'autoUpdate',
-      // ▼▼▼ 重要: 生成されるファイル名をHTMLと一致させる ▼▼▼
       manifestFilename: 'manifest.webmanifest',
-      // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
       includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
         name: 'Gourmet SP',
@@ -36,19 +53,21 @@ export default defineConfig({
         start_url: '/',
         icons: [
           {
-            src: 'pwa-192x192.png', // publicフォルダにこの画像があること！
+            src: 'pwa-192x192.png',
             sizes: '192x192',
             type: 'image/png'
           },
           {
-            src: 'pwa-512x512.png', // publicフォルダにこの画像があること！
+            src: 'pwa-512x512.png',
             sizes: '512x512',
             type: 'image/png'
           }
         ]
       },
       workbox: {
-        navigateFallback: '/404',
+        navigateFallback: '/index.html',
+        // 🔴 iOS対策: SWがWASMやONNXをキャッシュしようとして壊れるのを防ぐ
+        globIgnores: ['**/*.wasm', '**/*.onnx', '**/*ort-wasm*'],
         globPatterns: ['**/*.{css,js,html,svg,png,ico,txt}']
       }
     })
