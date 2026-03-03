@@ -199,7 +199,7 @@ export class ConciergeController extends CoreController {
 
       // ★ support_base /api/v2/ 経由でセッション開始
       const sessionInfo = await this.dialogueManager.startSession({
-        mode: 'gourmet',
+        mode: this.currentMode,
         language: this.currentLanguage,
         dialogueType: this.dialogueType,
         userId: userId,
@@ -253,27 +253,41 @@ export class ConciergeController extends CoreController {
   // 🔧 Socket.IOの初期化をオーバーライド
   // ========================================
   protected initSocket() {
-    // @ts-ignore
-    this.socket = io(this.backendUrl || this.apiBase || window.location.origin);
+    try {
+      // @ts-ignore
+      this.socket = io(this.backendUrl || this.apiBase || window.location.origin, {
+        reconnection: false,
+        timeout: 5000
+      });
 
-    this.socket.on('connect', () => { });
+      this.socket.on('connect', () => {
+        console.log('[Socket.IO] Connected (concierge)');
+      });
 
-    // ✅ コンシェルジュ版のhandleStreamingSTTCompleteを呼ぶように再登録
-    this.socket.on('transcript', (data: any) => {
-      const { text, is_final } = data;
-      if (this.isAISpeaking) return;
-      if (is_final) {
-        this.handleStreamingSTTComplete(text); // ← オーバーライド版が呼ばれる
-        this.currentAISpeech = "";
-      } else {
-        this.els.userInput.value = text;
-      }
-    });
+      this.socket.on('connect_error', () => {
+        console.log('[Socket.IO] Not available — using REST STT fallback');
+        this.socket.disconnect();
+      });
 
-    this.socket.on('error', (data: any) => {
-      this.addMessage('system', `${this.t('sttError')} ${data.message}`);
-      if (this.isRecording) this.stopStreamingSTT();
-    });
+      // ✅ コンシェルジュ版のhandleStreamingSTTCompleteを呼ぶように再登録
+      this.socket.on('transcript', (data: any) => {
+        const { text, is_final } = data;
+        if (this.isAISpeaking) return;
+        if (is_final) {
+          this.handleStreamingSTTComplete(text); // ← オーバーライド版が呼ばれる
+          this.currentAISpeech = "";
+        } else {
+          this.els.userInput.value = text;
+        }
+      });
+
+      this.socket.on('error', (data: any) => {
+        this.addMessage('system', `${this.t('sttError')} ${data.message}`);
+        if (this.isRecording) this.stopStreamingSTT();
+      });
+    } catch (e) {
+      console.warn('[Socket.IO] Init failed:', e);
+    }
   }
 
   // コンシェルジュモード固有: アバターアニメーション制御 + 公式リップシンク
