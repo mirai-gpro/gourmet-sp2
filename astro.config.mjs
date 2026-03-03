@@ -40,6 +40,10 @@ export default defineConfig({
           target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
           changeOrigin: true,
         },
+        '/api/stt': {
+          target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
+          changeOrigin: true,
+        },
         '/socket.io': {
           target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
           changeOrigin: true,

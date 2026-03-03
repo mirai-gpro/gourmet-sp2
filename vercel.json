@@ -24,6 +24,10 @@
       "destination": "${PUBLIC_API_URL}/api/v2/:path*"
     },
     {
+      "source": "/api/stt/:path*",
+      "destination": "${PUBLIC_API_URL}/api/stt/:path*"
+    },
+    {
       "source": "/socket.io/:path*",
       "destination": "${PUBLIC_API_URL}/socket.io/:path*"
     }

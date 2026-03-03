@@ -2,8 +2,8 @@
 // chat.astro - チャットのみのページ（テスト用）
 import GourmetChat from '../components/GourmetChat.astro';
 
-// APIベースURL
-const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
+// Dev: Vite proxy / Prod: Vercel rewrites で backend に転送
+const apiBaseUrl = '';
 ---
 
 <!DOCTYPE html>

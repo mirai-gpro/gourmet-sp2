@@ -5,9 +5,10 @@ import GourmetChat from '../components/GourmetChat.astro';
 import ShopCardList from '../components/ShopCardList.astro';
 import ReservationModal from '../components/ReservationModal.astro';
 
-// APIベースURL（Cloud Runのエンドポイント）
-// 本番環境では環境変数から取得
-const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
+// APIベースURL — 常に空文字列（相対パス）を使用
+// Dev: Vite proxy が /api/v2/* を PUBLIC_API_URL へ転送
+// Prod: Vercel rewrites が /api/v2/* を backend へ転送
+const apiBaseUrl = '';
 ---
 
 <!DOCTYPE html>
