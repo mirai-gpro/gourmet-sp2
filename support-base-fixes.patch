@@ -1,0 +1,149 @@
+diff --git a/cloudbuild.yaml b/cloudbuild.yaml
+index 57d3bcc..7506124 100644
+--- a/cloudbuild.yaml
++++ b/cloudbuild.yaml
+@@ -12,7 +12,7 @@
+ 
+ substitutions:
+   _SERVICE_NAME: support-base
+-  _REGION: asia-northeast1
++  _REGION: us-central1
+   _MEMORY: 1Gi
+ 
+ steps:
+@@ -50,6 +50,9 @@ steps:
+       - '--memory=${_MEMORY}'
+       - '--port=8080'
+       - '--allow-unauthenticated'
++      - '--session-affinity'
++      - '--timeout=3600'
++      - '--min-instances=1'
+ 
+ images:
+   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA'
+diff --git a/support_base/live/relay.py b/support_base/live/relay.py
+index f7a9b9b..cd7cb2e 100644
+--- a/support_base/live/relay.py
++++ b/support_base/live/relay.py
+@@ -261,7 +261,15 @@ class LiveRelay:
+ 
+                 sc = response.server_content
+                 if not sc:
+-                    # tool_call 等の処理 (将来拡張)
++                    # TODO: tool_call ハンドリング未実装
++                    # Gemini がレストラン検索等の Function Calling を返す場合、
++                    # ここで response.tool_call を処理し、結果を Gemini に返す必要がある。
++                    # 現状: Live API でお店検索は動作しない（REST /api/v2/rest/chat のみ対応）
++                    if hasattr(response, 'tool_call') and response.tool_call:
++                        logger.warning(
++                            f"[LiveRelay] Tool call received but not implemented: "
++                            f"{response.tool_call}"
++                        )
+                     continue
+ 
+                 # --- 割り込み検知 (stt_stream.py L650-662) ---
+diff --git a/support_base/rest/router.py b/support_base/rest/router.py
+index 293ce83..286b5fc 100644
+--- a/support_base/rest/router.py
++++ b/support_base/rest/router.py
+@@ -69,7 +69,7 @@ AUDIO2EXP_SERVICE_URL = os.getenv("AUDIO2EXP_SERVICE_URL", "")
+ class RestSessionStartRequest(BaseModel):
+     user_info: dict = {}
+     language: str = "ja"
+-    mode: str = "chat"  # "chat" or "concierge"
++    mode: str = "gourmet"  # "gourmet"(旧"chat") or "concierge"
+ 
+ 
+ class RestSessionStartResponse(BaseModel):
+@@ -83,7 +83,7 @@ class ChatRequest(BaseModel):
+     message: str
+     stage: str = "conversation"
+     language: str = "ja"
+-    mode: str = "chat"
++    mode: str = "gourmet"
+ 
+ 
+ class FinalizeRequest(BaseModel):
+@@ -113,6 +113,13 @@ class STTRequest(BaseModel):
+ router = APIRouter(prefix="/api/v2/rest", tags=["REST API"])
+ 
+ 
++def _normalize_mode(mode: str) -> str:
++    """Live API mode → REST mode に正規化 ('gourmet' → 'chat')"""
++    if mode == "gourmet":
++        return "chat"
++    return mode
++
++
+ # === ヘルパー ===
+ 
+ def _get_expression_frames(audio_base64: str, session_id: str, audio_format: str = "mp3"):
+@@ -153,9 +160,10 @@ async def rest_start_session(req: RestSessionStartRequest):
+     SupportSession + SupportAssistant を使ってセッションを初期化する。
+     """
+     try:
+-        # 1. セッション初期化
++        # 1. セッション初期化（mode正規化: gourmet→chat）
++        rest_mode = _normalize_mode(req.mode)
+         session = SupportSession()
+-        session.initialize(req.user_info, language=req.language, mode=req.mode)
++        session.initialize(req.user_info, language=req.language, mode=rest_mode)
+ 
+         # 2. アシスタント作成
+         assistant = SupportAssistant(session, SYSTEM_PROMPTS)
+@@ -206,11 +214,20 @@ async def rest_chat(req: ChatRequest):
+         session_data = session.get_data()
+ 
+         if not session_data:
+-            raise HTTPException(status_code=404, detail="Session not found")
++            # Live API セッションからの REST チャット要求: 自動初期化
++            # (Live API は SessionManager、REST は SupportSession で別管理のため)
++            rest_mode = _normalize_mode(req.mode)
++            logger.info(
++                f"[REST] Auto-creating SupportSession for Live API session: "
++                f"{req.session_id}, mode={rest_mode}"
++            )
++            session.initialize({}, language=req.language, mode=rest_mode)
++            session_data = session.get_data()
+ 
+-        # 1. 状態確定
++        # 1. 状態確定（mode正規化: gourmet→chat）
++        rest_mode = _normalize_mode(req.mode)
+         session.update_language(req.language)
+-        session.update_mode(req.mode)
++        session.update_mode(rest_mode)
+ 
+         # 2. ユーザー入力を記録
+         session.add_message("user", req.message, "chat")
+diff --git a/support_base/server.py b/support_base/server.py
+index cc6ff61..3ac5302 100644
+--- a/support_base/server.py
++++ b/support_base/server.py
+@@ -117,6 +117,10 @@ class SessionStartResponse(BaseModel):
+     ws_url: str
+ 
+ 
++class SessionEndRequest(BaseModel):
++    session_id: str
++
++
+ class SessionEndResponse(BaseModel):
+     session_id: str
+     ended: bool
+@@ -173,12 +177,12 @@ async def start_session(req: SessionStartRequest):
+ 
+ 
+ @app.post("/api/v2/session/end", response_model=SessionEndResponse)
+-async def end_session(session_id: str):
++async def end_session(req: SessionEndRequest):
+     """セッション終了"""
+-    ended = session_manager.end_session(session_id)
++    ended = session_manager.end_session(req.session_id)
+     if not ended:
+-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+-    return SessionEndResponse(session_id=session_id, ended=True)
++        raise HTTPException(status_code=404, detail=f"Session not found: {req.session_id}")
++    return SessionEndResponse(session_id=req.session_id, ended=True)
+ 
+ 
+ @app.get("/api/v2/modes")
