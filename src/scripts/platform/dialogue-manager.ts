@@ -65,6 +65,7 @@ type EventHandler<T = any> = (data: T) => void;
 
 export class DialogueManager {
   private apiBase: string;
+  private backendUrl: string;
   private sessionId: string | null = null;
   private mode: string = 'chat';
   private language: string = 'ja';
@@ -77,8 +78,9 @@ export class DialogueManager {
   // イベントハンドラ
   private eventHandlers: Map<string, EventHandler[]> = new Map();
 
-  constructor(apiBase: string) {
+  constructor(apiBase: string, backendUrl: string = '') {
     this.apiBase = apiBase;
+    this.backendUrl = backendUrl;
   }
 
   // ========================================
@@ -131,7 +133,14 @@ export class DialogueManager {
 
     // Live API モードの場合、WebSocket 接続を準備
     if (this.dialogueType === 'live' && info.wsUrl) {
-      await this.connectLive(info.wsUrl);
+      try {
+        // backendUrl がある場合、相対パスの ws_url を絶対URLに変換
+        const wsUrl = this.resolveWsUrl(info.wsUrl);
+        await this.connectLive(wsUrl);
+      } catch (e) {
+        console.warn('[DialogueManager] Live API connection failed, falling back to REST:', e);
+        this.dialogueType = 'rest';
+      }
     }
 
     return info;
@@ -234,6 +243,21 @@ export class DialogueManager {
   // ========================================
   // Live API 対話
   // ========================================
+
+  /**
+   * 相対パスの ws_url をバックエンド直接接続の絶対URLに変換
+   * Vercel proxy は WebSocket 非対応のため、backendUrl に直接接続する
+   */
+  private resolveWsUrl(wsUrl: string): string {
+    if (wsUrl.startsWith('ws://') || wsUrl.startsWith('wss://')) {
+      return wsUrl; // already absolute
+    }
+    if (this.backendUrl) {
+      const base = this.backendUrl.replace(/^http/, 'ws');
+      return `${base}${wsUrl}`;
+    }
+    return wsUrl; // relative — LiveWSClient will use window.location.host
+  }
 
   private async connectLive(wsUrl: string): Promise<void> {
     this.wsClient = new LiveWSClient({ wsUrl });

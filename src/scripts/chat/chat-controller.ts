@@ -4,11 +4,12 @@ import { AudioManager } from './audio-manager';
 
 export class ChatController extends CoreController {
   
-  constructor(container: HTMLElement, apiBase: string) {
-    super(container, apiBase);
+  constructor(container: HTMLElement, apiBase: string, backendUrl: string = '') {
+    super(container, apiBase, backendUrl);
     this.audioManager = new AudioManager(4500);
-    // チャットモードに設定
+    // チャットモードに設定（REST経路 — WebSocket不要）
     this.currentMode = 'chat';
+    this.dialogueType = 'rest';
     this.init();
   }
 
