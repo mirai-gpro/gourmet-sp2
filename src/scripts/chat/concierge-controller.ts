@@ -3,6 +3,7 @@
 // src/scripts/chat/concierge-controller.ts
 import { CoreController } from './core-controller';
 import { AudioManager } from './audio-manager';
+import type { ExpressionData } from '../platform/dialogue-manager';
 
 declare const io: any;
 
@@ -157,75 +158,91 @@ export class ConciergeController extends CoreController {
   }
 
   // ========================================
+  // ★ Live API Expression 受信: LAMAvatar に投入
+  // ========================================
+  protected handleLiveExpression(data: ExpressionData): void {
+    const lamController = (window as any).lamAvatarController;
+    if (!lamController || !data?.names || !data?.frames?.length) return;
+
+    const frameRate = data.frame_rate || 30;
+
+    // Live API の expression は REST と同じフォーマット
+    // relay.py: { names, frames, frame_rate }
+    const frames = data.frames.map((f: any) => {
+      const frame: { [key: string]: number } = {};
+      const values: number[] = Array.isArray(f) ? f : (f.weights || []);
+      data.names.forEach((name: string, i: number) => {
+        let val = values[i] || 0;
+        val = Math.min(ConciergeController.BLENDSHAPE_SAFE_MAX, val);
+        frame[name] = val;
+      });
+      return frame;
+    });
+
+    // Live API はストリーミングなので append（clearFrameBuffer しない）
+    lamController.queueExpressionFrames(frames, frameRate);
+  }
+
+  // ========================================
   // 🎯 セッション初期化をオーバーライド(挨拶文を変更)
   // ========================================
   protected async initializeSession() {
     try {
+      // 既存セッション終了
       if (this.sessionId) {
         try {
-          await fetch(`${this.apiBase}/api/session/end`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: this.sessionId })
-          });
+          await this.dialogueManager.endSession();
         } catch (e) {}
       }
 
-      // ★ user_id を取得（親クラスのメソッドを使用）
       const userId = this.getUserId();
 
-      const res = await fetch(`${this.apiBase}/api/session/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_info: { user_id: userId },
-          language: this.currentLanguage,
-          mode: 'concierge'
-        })
+      // ★ support_base /api/v2/ 経由でセッション開始
+      const sessionInfo = await this.dialogueManager.startSession({
+        mode: 'concierge',
+        language: this.currentLanguage,
+        dialogueType: this.dialogueType,
+        userId: userId,
+        userInfo: { user_id: userId },
       });
-      const data = await res.json();
-      this.sessionId = data.session_id;
 
-      // リップシンク: バックエンドTTSエンドポイント経由で表情データ取得（追加接続不要）
+      this.sessionId = sessionInfo.sessionId;
+      this.dialogueManager.currentSessionId = this.sessionId;
 
       // ✅ バックエンドからの初回メッセージを使用（長期記憶対応）
-      const greetingText = data.initial_message || this.t('initialGreetingConcierge');
+      const greetingText = sessionInfo.initialMessage || this.t('initialGreetingConcierge');
       this.addMessage('assistant', greetingText, null, true);
-      
+
       const ackTexts = [
-        this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'), 
+        this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
-      
+
       const ackPromises = ackTexts.map(async (text) => {
         try {
-          const ackResponse = await fetch(`${this.apiBase}/api/tts/synthesize`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
-              session_id: this.sessionId
-            })
-          });
-          const ackData = await ackResponse.json();
-          if (ackData.success && ackData.audio) {
-            this.preGeneratedAcks.set(text, ackData.audio);
+          const result = await this.dialogueManager.synthesizeTTS(
+            text, langConfig.tts, langConfig.voice, this.sessionId!
+          );
+          if (result.success && result.audio) {
+            this.preGeneratedAcks.set(text, result.audio);
           }
         } catch (_e) { }
       });
 
       await Promise.all([
-        this.speakTextGCP(greetingText), 
+        this.speakTextGCP(greetingText),
         ...ackPromises
       ]);
-      
+
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
       this.els.speakerBtn.disabled = false;
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
+
+      console.log(`[Concierge] Session started: ${this.sessionId} type=${this.dialogueType}`);
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
@@ -238,9 +255,9 @@ export class ConciergeController extends CoreController {
   protected initSocket() {
     // @ts-ignore
     this.socket = io(this.apiBase || window.location.origin);
-    
+
     this.socket.on('connect', () => { });
-    
+
     // ✅ コンシェルジュ版のhandleStreamingSTTCompleteを呼ぶように再登録
     this.socket.on('transcript', (data: any) => {
       const { text, is_final } = data;
@@ -284,16 +301,10 @@ export class ConciergeController extends CoreController {
       this.els.voiceStatus.className = 'voice-status speaking';
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
-      // TTS音声を取得
-      const response = await fetch(`${this.apiBase}/api/tts/synthesize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: cleanText, language_code: langConfig.tts, voice_name: langConfig.voice,
-          session_id: this.sessionId
-        })
-      });
-      const data = await response.json();
+      // ★ DialogueManager 経由 /api/v2/ TTS
+      const data = await this.dialogueManager.synthesizeTTS(
+        cleanText, langConfig.tts, langConfig.voice, this.sessionId!
+      );
 
       if (data.success && data.audio) {
         // ★ TTS応答に同梱されたExpressionを即バッファ投入（遅延ゼロ）
@@ -590,27 +601,17 @@ export class ConciergeController extends CoreController {
         const cleanRemaining = remainingSentences.trim().length > 0
           ? this.stripMarkdown(remainingSentences) : null;
 
-        // ★ 4つのAPIコールを可能な限り並行で開始
+        // ★ 並行 TTS via DialogueManager (/api/v2/)
         // 1. 最初のセンテンスTTS
-        const firstTtsPromise = fetch(`${this.apiBase}/api/tts/synthesize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: cleanFirst, language_code: langConfig.tts,
-            voice_name: langConfig.voice, session_id: this.sessionId
-          })
-        }).then(r => r.json());
+        const firstTtsPromise = this.dialogueManager.synthesizeTTS(
+          cleanFirst, langConfig.tts, langConfig.voice, this.sessionId!
+        );
 
         // 2. 残りのセンテンスTTS（あれば）
         const remainingTtsPromise = cleanRemaining
-          ? fetch(`${this.apiBase}/api/tts/synthesize`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                text: cleanRemaining, language_code: langConfig.tts,
-                voice_name: langConfig.voice, session_id: this.sessionId
-              })
-            }).then(r => r.json())
+          ? this.dialogueManager.synthesizeTTS(
+              cleanRemaining, langConfig.tts, langConfig.voice, this.sessionId!
+            )
           : null;
 
         // ★ 最初のTTSが返ったら即再生（Expression同梱済み）
@@ -693,11 +694,11 @@ export class ConciergeController extends CoreController {
   // ========================================
   protected async handleStreamingSTTComplete(transcript: string) {
     this.stopStreamingSTT();
-    
+
     if ('mediaSession' in navigator) {
       try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
     }
-    
+
     this.els.voiceStatus.innerHTML = this.t('voiceStatusComplete');
     this.els.voiceStatus.className = 'voice-status';
 
@@ -712,7 +713,7 @@ export class ConciergeController extends CoreController {
 
     this.els.userInput.value = transcript;
     this.addMessage('user', transcript);
-    
+
     // 短すぎる入力チェック
     const textLength = transcript.trim().replace(/\s+/g, '').length;
     if (textLength < 2) {
@@ -720,8 +721,8 @@ export class ConciergeController extends CoreController {
         this.addMessage('assistant', msg);
         if (this.isTTSEnabled && this.isUserInteracted) {
           await this.speakTextGCP(msg, true);
-        } else { 
-          await new Promise(r => setTimeout(r, 2000)); 
+        } else {
+          await new Promise(r => setTimeout(r, 2000));
         }
         this.els.userInput.value = '';
         this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
@@ -772,13 +773,13 @@ export class ConciergeController extends CoreController {
     }
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
-    
+
     const currentSessionId = this.sessionId;
     const isTextInput = !this.isFromVoiceInput;
-    
-    this.isProcessing = true; 
+
+    this.isProcessing = true;
     this.els.sendBtn.disabled = true;
-    this.els.micBtn.disabled = true; 
+    this.els.micBtn.disabled = true;
     this.els.userInput.disabled = true;
 
     // ✅ テキスト入力時も「はい」だけに簡略化
@@ -792,14 +793,14 @@ export class ConciergeController extends CoreController {
            this.resetInputState();
            return;
       }
-      
+
       this.els.userInput.value = '';
-      
+
       // ✅ 修正: 即答を「はい」だけに
       const ackText = this.t('ackYes');
       this.currentAISpeech = ackText;
       this.addMessage('assistant', ackText);
-      
+
       if (this.isTTSEnabled && !isTextInput) {
         try {
           const preGeneratedAudio = this.preGeneratedAcks.get(ackText);
@@ -810,49 +811,41 @@ export class ConciergeController extends CoreController {
               this.ttsPlayer.onended = () => resolve();
               this.ttsPlayer.play().catch(_e => resolve());
             });
-          } else { 
-            firstAckPromise = this.speakTextGCP(ackText, false); 
+          } else {
+            firstAckPromise = this.speakTextGCP(ackText, false);
           }
         } catch (_e) {}
-      }   
+      }
       if (firstAckPromise) await firstAckPromise;
-      
+
       // ✅ 修正: オウム返しパターンを削除
       // (generateFallbackResponse, additionalResponse の呼び出しを削除)
     }
 
     this.isFromVoiceInput = false;
-    
+
     // ✅ 待機アニメーションは6.5秒後に表示(LLM送信直前にタイマースタート)
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
     let responseReceived = false;
-    
+
     // タイマーセットをtry直前に移動(即答処理の後)
-    this.waitOverlayTimer = window.setTimeout(() => { 
+    this.waitOverlayTimer = window.setTimeout(() => {
       if (!responseReceived) {
-        this.showWaitOverlay(); 
+        this.showWaitOverlay();
       }
     }, 6500);
 
     try {
-      const response = await fetch(`${this.apiBase}/api/chat`, { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ 
-          session_id: currentSessionId, 
-          message: message, 
-          stage: this.currentStage, 
-          language: this.currentLanguage,
-          mode: this.currentMode
-        }) 
-      });
-      const data = await response.json();
-      
+      // ★ /api/v2/ 経由でチャット送信
+      const data = await this.dialogueManager.sendChat(
+        message, this.currentStage, this.currentMode
+      );
+
       // ✅ レスポンス到着フラグを立てる
       responseReceived = true;
-      
+
       if (this.sessionId !== currentSessionId) return;
-      
+
       // ✅ タイマーをクリアしてアニメーションを非表示
       if (this.waitOverlayTimer) {
         clearTimeout(this.waitOverlayTimer);
@@ -861,7 +854,7 @@ export class ConciergeController extends CoreController {
       this.hideWaitOverlay();
       this.currentAISpeech = data.response;
       this.addMessage('assistant', data.response, data.summary);
-      
+
       if (this.isTTSEnabled) {
         this.stopCurrentAudio();
       }
@@ -870,10 +863,10 @@ export class ConciergeController extends CoreController {
         this.currentShops = data.shops;
         this.els.reservationBtn.classList.add('visible');
         this.els.userInput.value = '';
-        document.dispatchEvent(new CustomEvent('displayShops', { 
-          detail: { shops: data.shops, language: this.currentLanguage } 
+        document.dispatchEvent(new CustomEvent('displayShops', {
+          detail: { shops: data.shops, language: this.currentLanguage }
         }));
-        
+
         const section = document.getElementById('shopListSection');
         if (section) section.classList.add('has-shops');
         if (window.innerWidth < 1024) {
@@ -882,7 +875,7 @@ export class ConciergeController extends CoreController {
             if (shopSection) shopSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
            }, 300);
         }
-        
+
         (async () => {
           try {
             // ★ ack再生中ならttsPlayer解放を待つ（並行処理の同期ポイント）
@@ -896,15 +889,15 @@ export class ConciergeController extends CoreController {
             if (this.isRecording) { this.stopStreamingSTT(); }
 
             await this.speakTextGCP(this.t('ttsIntro'), true, false, false);
-            
+
             const lines = data.response.split('\n\n');
-            let introText = ""; 
+            let introText = "";
             let shopLines = lines;
-            if (lines[0].includes('ご希望に合うお店') && lines[0].includes('ご紹介します')) { 
-              introText = lines[0]; 
-              shopLines = lines.slice(1); 
+            if (lines[0].includes('ご希望に合うお店') && lines[0].includes('ご紹介します')) {
+              introText = lines[0];
+              shopLines = lines.slice(1);
             }
-            
+
             let introPart2Promise: Promise<void> | null = null;
             if (introText && this.isTTSEnabled && this.isUserInteracted && !isTextInput) {
                 const preGeneratedIntro = this.preGeneratedAcks.get(introText);
@@ -915,7 +908,7 @@ export class ConciergeController extends CoreController {
                   this.ttsPlayer.onended = () => resolve();
                   this.ttsPlayer.play();
                 });
-              } else { 
+              } else {
                 introPart2Promise = this.speakTextGCP(introText, false, false, false);
               }
             }
@@ -928,25 +921,17 @@ export class ConciergeController extends CoreController {
               const firstShop = shopLines[0];
               const restShops = shopLines.slice(1).join('\n\n');
 
-              // ★ 1行目先行: 最初のショップと残りのTTSを並行開始
-              firstShopTtsPromise = fetch(`${this.apiBase}/api/tts/synthesize`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  text: this.stripMarkdown(firstShop), language_code: shopLangConfig.tts,
-                  voice_name: shopLangConfig.voice, session_id: this.sessionId
-                })
-              }).then(r => r.json());
+              // ★ 1行目先行: 最初のショップと残りのTTSを並行開始 (via DialogueManager)
+              firstShopTtsPromise = this.dialogueManager.synthesizeTTS(
+                this.stripMarkdown(firstShop), shopLangConfig.tts,
+                shopLangConfig.voice, this.sessionId!
+              );
 
               if (restShops) {
-                remainingShopTtsPromise = fetch(`${this.apiBase}/api/tts/synthesize`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    text: this.stripMarkdown(restShops), language_code: shopLangConfig.tts,
-                    voice_name: shopLangConfig.voice, session_id: this.sessionId
-                  })
-                }).then(r => r.json());
+                remainingShopTtsPromise = this.dialogueManager.synthesizeTTS(
+                  this.stripMarkdown(restShops), shopLangConfig.tts,
+                  shopLangConfig.voice, this.sessionId!
+                );
               }
             }
 
@@ -1029,11 +1014,11 @@ export class ConciergeController extends CoreController {
           }
         }
       }
-    } catch (error) { 
+    } catch (error) {
       console.error('送信エラー:', error);
-      this.hideWaitOverlay(); 
-      this.showError('メッセージの送信に失敗しました。'); 
-    } finally { 
+      this.hideWaitOverlay();
+      this.showError('メッセージの送信に失敗しました。');
+    } finally {
       this.resetInputState();
       this.els.userInput.blur();
     }
