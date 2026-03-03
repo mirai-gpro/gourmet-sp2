@@ -17,8 +17,8 @@ export class ConciergeController extends CoreController {
     // ★コンシェルジュモード用のAudioManagerを6.5秒設定で再初期化２
     this.audioManager = new AudioManager(8000);
 
-    // コンシェルジュモードに設定
-    this.currentMode = 'concierge';
+    // コンシェルジュモードに設定（バックエンドは 'gourmet' モードのみ対応）
+    this.currentMode = 'gourmet';
     this.init();
   }
 
@@ -199,7 +199,7 @@ export class ConciergeController extends CoreController {
 
       // ★ support_base /api/v2/ 経由でセッション開始
       const sessionInfo = await this.dialogueManager.startSession({
-        mode: 'concierge',
+        mode: 'gourmet',
         language: this.currentLanguage,
         dialogueType: this.dialogueType,
         userId: userId,
