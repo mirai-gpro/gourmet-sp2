@@ -3,8 +3,8 @@
 import ConciergeComponent from '../components/Concierge.astro';
 import ShopCardList from '../components/ShopCardList.astro';
 
-// Dev: Vite proxy / Prod: Vercel rewrites で backend に転送
-const apiBaseUrl = '';
+// Cloud RunのCORSを利用して直接クロスオリジンで呼び出す
+const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
 ---
 
 <!DOCTYPE html>
