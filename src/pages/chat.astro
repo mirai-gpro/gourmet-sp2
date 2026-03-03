@@ -2,8 +2,8 @@
 // chat.astro - チャットのみのページ（テスト用）
 import GourmetChat from '../components/GourmetChat.astro';
 
-// Cloud RunのCORSを利用して直接クロスオリジンで呼び出す
-const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
+// Vercel rewrites で same-origin proxy 経由
+const apiBaseUrl = '';
 ---
 
 <!DOCTYPE html>

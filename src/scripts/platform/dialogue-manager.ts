@@ -94,19 +94,25 @@ export class DialogueManager {
     this.language = params.language ?? 'ja';
     this.dialogueType = params.dialogueType ?? 'live';
 
-    const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
+    const url = `${this.apiBase}/api/v2/session/start`;
+    const payload = {
+      mode: this.mode,
+      language: this.language,
+      dialogue_type: this.dialogueType,
+      user_id: params.userId || null,
+      user_info: params.userInfo || {},
+    };
+    console.log(`[DialogueManager] POST ${url}`, JSON.stringify(payload));
+
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        mode: this.mode,
-        language: this.language,
-        dialogue_type: this.dialogueType,
-        user_id: params.userId || null,
-        user_info: params.userInfo || {},
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
+      const errBody = await res.text().catch(() => '(no body)');
+      console.error(`[DialogueManager] Session start ${res.status}: ${errBody}`);
       throw new Error(`Session start failed: ${res.status}`);
     }
 
