@@ -7,9 +7,9 @@ export class ChatController extends CoreController {
   constructor(container: HTMLElement, apiBase: string, backendUrl: string = '') {
     super(container, apiBase, backendUrl);
     this.audioManager = new AudioManager(4500);
-    // グルメモードに設定（REST経路 — WebSocket不要）
+    // グルメモードに設定（Live API 経路）
     this.currentMode = 'gourmet';
-    this.dialogueType = 'rest';
+    this.dialogueType = 'live';
     this.init();
   }
 

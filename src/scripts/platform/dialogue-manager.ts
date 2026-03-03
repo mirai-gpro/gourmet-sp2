@@ -1,17 +1,16 @@
 /**
- * DialogueManager — REST/Live API 対話の共通インターフェース
+ * DialogueManager — Live API + REST 対話管理
  *
- * PLATFORM_SPEC_v2.md §4 の設計に準拠。
- * モード（gourmet, concierge）に依存しない対話管理レイヤー。
+ * 基本は Live API（WebSocket）でリアルタイム会話。
+ * お店紹介など長文テキストのみ REST API を使用。
  *
- * REST 経路:
- *   POST /api/v2/rest/session/start → session_id
- *   POST /api/v2/rest/chat → { response, audio, expression, shops }
- *   POST /api/v2/rest/tts/synthesize → { audio, expression }
- *
- * Live API 経路:
+ * Live API（メイン）:
  *   POST /api/v2/session/start → { session_id, ws_url }
  *   WebSocket /api/v2/live/{session_id} → 音声ストリーミング
+ *
+ * REST API（お店紹介・TTS等）:
+ *   POST /api/v2/rest/chat → { response, audio, expression, shops }
+ *   POST /api/v2/rest/tts/synthesize → { audio, expression }
  */
 
 import { LiveWSClient, type LiveWSMessage } from './live-ws-client';
@@ -88,34 +87,23 @@ export class DialogueManager {
   // ========================================
 
   /**
-   * セッション開始
-   * REST: POST /api/v2/rest/session/start
-   * Live: POST /api/v2/session/start
+   * セッション開始（Live API）
+   * POST /api/v2/session/start → { session_id, ws_url }
    */
   async startSession(params: SessionStartParams = {}): Promise<SessionInfo> {
     this.mode = params.mode ?? 'gourmet';
     this.language = params.language ?? 'ja';
     this.dialogueType = params.dialogueType ?? 'live';
 
-    // REST と Live で異なるエンドポイント・ペイロードを使用
-    const isRest = this.dialogueType === 'rest';
-    const url = isRest
-      ? `${this.apiBase}/api/v2/rest/session/start`
-      : `${this.apiBase}/api/v2/session/start`;
+    const url = `${this.apiBase}/api/v2/session/start`;
 
-    const payload = isRest
-      ? {
-          mode: this.mode,
-          language: this.language,
-          user_info: params.userInfo || {},
-        }
-      : {
-          mode: this.mode,
-          language: this.language,
-          dialogue_type: this.dialogueType,
-          user_id: params.userId || null,
-          user_info: params.userInfo || {},
-        };
+    const payload = {
+      mode: this.mode,
+      language: this.language,
+      dialogue_type: this.dialogueType,
+      user_id: params.userId || null,
+      user_info: params.userInfo || {},
+    };
 
     console.log(`[DialogueManager] POST ${url}`, JSON.stringify(payload));
 
@@ -144,47 +132,13 @@ export class DialogueManager {
       wsUrl: data.ws_url,
     };
 
-    // Live API モードの場合、WebSocket 接続を準備
+    // Live API モードの場合、WebSocket 接続を確立（フォールバックなし）
     if (this.dialogueType === 'live' && info.wsUrl) {
-      try {
-        // backendUrl がある場合、相対パスの ws_url を絶対URLに変換
-        const wsUrl = this.resolveWsUrl(info.wsUrl);
-        await this.connectLive(wsUrl);
-      } catch (e) {
-        console.warn('[DialogueManager] Live API connection failed, falling back to REST:', e);
-        // Live → REST フォールバック: REST セッションを再作成
-        this.dialogueType = 'rest';
-        await this.restartAsRest(params);
-      }
+      const wsUrl = this.resolveWsUrl(info.wsUrl);
+      await this.connectLive(wsUrl);
     }
 
     return info;
-  }
-
-  /**
-   * Live → REST フォールバック時にREST セッションを再作成
-   */
-  private async restartAsRest(params: SessionStartParams): Promise<void> {
-    try {
-      const url = `${this.apiBase}/api/v2/rest/session/start`;
-      const payload = {
-        mode: this.mode,
-        language: this.language,
-        user_info: params.userInfo || {},
-      };
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        this.sessionId = data.session_id;
-        console.log(`[DialogueManager] REST fallback session: ${this.sessionId}`);
-      }
-    } catch (e) {
-      console.error('[DialogueManager] REST fallback failed:', e);
-    }
   }
 
   /**
