@@ -31,7 +31,7 @@ export class CoreController {
   protected preGeneratedAcks: Map<string, string> = new Map();
   protected isAISpeaking = false;
   protected currentAISpeech = "";
-  protected currentMode: 'chat' | 'concierge' = 'chat';
+  protected currentMode: 'gourmet' | 'concierge' = 'gourmet';
 
   // ★追加: バックグラウンド状態の追跡
   protected isInBackground = false;
