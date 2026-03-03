@@ -5,9 +5,8 @@ import GourmetChat from '../components/GourmetChat.astro';
 import ShopCardList from '../components/ShopCardList.astro';
 import ReservationModal from '../components/ReservationModal.astro';
 
-// APIベースURL — Vercel static rewriteはPOSTをGETに変換するため
-// Cloud RunのCORSを利用して直接クロスオリジンで呼び出す
-const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
+// APIベースURL — Vercel rewrites で same-origin proxy 経由
+const apiBaseUrl = '';
 ---
 
 <!DOCTYPE html>
