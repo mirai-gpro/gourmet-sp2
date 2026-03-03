@@ -89,21 +89,34 @@ export class DialogueManager {
 
   /**
    * セッション開始
-   * support_base server.py: POST /api/v2/session/start
+   * REST: POST /api/v2/rest/session/start
+   * Live: POST /api/v2/session/start
    */
   async startSession(params: SessionStartParams = {}): Promise<SessionInfo> {
     this.mode = params.mode ?? 'gourmet';
     this.language = params.language ?? 'ja';
     this.dialogueType = params.dialogueType ?? 'live';
 
-    const url = `${this.apiBase}/api/v2/session/start`;
-    const payload = {
-      mode: this.mode,
-      language: this.language,
-      dialogue_type: this.dialogueType,
-      user_id: params.userId || null,
-      user_info: params.userInfo || {},
-    };
+    // REST と Live で異なるエンドポイント・ペイロードを使用
+    const isRest = this.dialogueType === 'rest';
+    const url = isRest
+      ? `${this.apiBase}/api/v2/rest/session/start`
+      : `${this.apiBase}/api/v2/session/start`;
+
+    const payload = isRest
+      ? {
+          mode: this.mode,
+          language: this.language,
+          user_info: params.userInfo || {},
+        }
+      : {
+          mode: this.mode,
+          language: this.language,
+          dialogue_type: this.dialogueType,
+          user_id: params.userId || null,
+          user_info: params.userInfo || {},
+        };
+
     console.log(`[DialogueManager] POST ${url}`, JSON.stringify(payload));
 
     const res = await fetch(url, {
@@ -139,11 +152,39 @@ export class DialogueManager {
         await this.connectLive(wsUrl);
       } catch (e) {
         console.warn('[DialogueManager] Live API connection failed, falling back to REST:', e);
+        // Live → REST フォールバック: REST セッションを再作成
         this.dialogueType = 'rest';
+        await this.restartAsRest(params);
       }
     }
 
     return info;
+  }
+
+  /**
+   * Live → REST フォールバック時にREST セッションを再作成
+   */
+  private async restartAsRest(params: SessionStartParams): Promise<void> {
+    try {
+      const url = `${this.apiBase}/api/v2/rest/session/start`;
+      const payload = {
+        mode: this.mode,
+        language: this.language,
+        user_info: params.userInfo || {},
+      };
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.sessionId = data.session_id;
+        console.log(`[DialogueManager] REST fallback session: ${this.sessionId}`);
+      }
+    } catch (e) {
+      console.error('[DialogueManager] REST fallback failed:', e);
+    }
   }
 
   /**

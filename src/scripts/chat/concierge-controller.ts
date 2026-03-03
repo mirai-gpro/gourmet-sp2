@@ -17,8 +17,9 @@ export class ConciergeController extends CoreController {
     // ★コンシェルジュモード用のAudioManagerを6.5秒設定で再初期化２
     this.audioManager = new AudioManager(8000);
 
-    // コンシェルジュモードに設定
+    // コンシェルジュモードに設定（REST経路 — Live API は 'concierge' 非対応）
     this.currentMode = 'concierge';
+    this.dialogueType = 'rest';
     this.init();
   }
 
