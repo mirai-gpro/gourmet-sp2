@@ -8,7 +8,7 @@ export class ChatController extends CoreController {
     super(container, apiBase);
     this.audioManager = new AudioManager(4500);
     // チャットモードに設定
-    this.currentMode = 'chat';
+    this.currentMode = 'gourmet';
     this.init();
   }
 
