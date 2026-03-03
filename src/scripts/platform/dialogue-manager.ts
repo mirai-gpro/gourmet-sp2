@@ -2,7 +2,7 @@
  * DialogueManager — REST/Live API 対話の共通インターフェース
  *
  * PLATFORM_SPEC_v2.md §4 の設計に準拠。
- * モード（chat, concierge）に依存しない対話管理レイヤー。
+ * モード（gourmet, concierge）に依存しない対話管理レイヤー。
  *
  * REST 経路:
  *   POST /api/v2/rest/session/start → session_id
@@ -67,7 +67,7 @@ export class DialogueManager {
   private apiBase: string;
   private backendUrl: string;
   private sessionId: string | null = null;
-  private mode: string = 'chat';
+  private mode: string = 'gourmet';
   private language: string = 'ja';
   private dialogueType: DialogueType = 'live';
 
@@ -92,7 +92,7 @@ export class DialogueManager {
    * support_base server.py: POST /api/v2/session/start
    */
   async startSession(params: SessionStartParams = {}): Promise<SessionInfo> {
-    this.mode = params.mode ?? 'chat';
+    this.mode = params.mode ?? 'gourmet';
     this.language = params.language ?? 'ja';
     this.dialogueType = params.dialogueType ?? 'live';
 

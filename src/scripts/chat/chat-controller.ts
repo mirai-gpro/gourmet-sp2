@@ -7,8 +7,8 @@ export class ChatController extends CoreController {
   constructor(container: HTMLElement, apiBase: string, backendUrl: string = '') {
     super(container, apiBase, backendUrl);
     this.audioManager = new AudioManager(4500);
-    // チャットモードに設定（REST経路 — WebSocket不要）
-    this.currentMode = 'chat';
+    // グルメモードに設定（REST経路 — WebSocket不要）
+    this.currentMode = 'gourmet';
     this.dialogueType = 'rest';
     this.init();
   }

@@ -32,7 +32,7 @@ export class CoreController {
   protected preGeneratedAcks: Map<string, string> = new Map();
   protected isAISpeaking = false;
   protected currentAISpeech = "";
-  protected currentMode: 'chat' | 'concierge' = 'chat';
+  protected currentMode: 'gourmet' | 'concierge' = 'gourmet';
 
   // ★追加: バックグラウンド状態の追跡
   protected isInBackground = false;
@@ -312,33 +312,44 @@ export class CoreController {
     });
   }
 
-  // ★修正: Socket.IO接続設定に再接続オプションを追加（transportsは削除）
+  // ★ Socket.IO接続 — バックエンドが対応している場合のみ
+  // Cloud Run (support_base) には socket.io エンドポイントが無いため、
+  // 接続失敗時は REST STT (transcribeAudio) にフォールバック
   protected initSocket() {
-    // @ts-ignore
-    this.socket = io(this.backendUrl || this.apiBase || window.location.origin, {
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionAttempts: 5,
-      timeout: 10000
-    });
+    try {
+      // @ts-ignore
+      this.socket = io(this.backendUrl || this.apiBase || window.location.origin, {
+        reconnection: false,  // 404 リトライスパムを防止
+        timeout: 5000
+      });
 
-    this.socket.on('connect', () => { });
+      this.socket.on('connect', () => {
+        console.log('[Socket.IO] Connected');
+      });
 
-    this.socket.on('transcript', (data: any) => {
-      const { text, is_final } = data;
-      if (this.isAISpeaking) return;
-      if (is_final) {
-        this.handleStreamingSTTComplete(text);
-        this.currentAISpeech = "";
-      } else {
-        this.els.userInput.value = text;
-      }
-    });
+      this.socket.on('connect_error', () => {
+        console.log('[Socket.IO] Not available — using REST STT fallback');
+        this.socket.disconnect();
+      });
 
-    this.socket.on('error', (data: any) => {
-      this.addMessage('system', `${this.t('sttError')} ${data.message}`);
-      if (this.isRecording) this.stopStreamingSTT();
-    });
+      this.socket.on('transcript', (data: any) => {
+        const { text, is_final } = data;
+        if (this.isAISpeaking) return;
+        if (is_final) {
+          this.handleStreamingSTTComplete(text);
+          this.currentAISpeech = "";
+        } else {
+          this.els.userInput.value = text;
+        }
+      });
+
+      this.socket.on('error', (data: any) => {
+        this.addMessage('system', `${this.t('sttError')} ${data.message}`);
+        if (this.isRecording) this.stopStreamingSTT();
+      });
+    } catch (e) {
+      console.warn('[Socket.IO] Init failed:', e);
+    }
   }
 
   protected async initializeSession() {
@@ -505,6 +516,35 @@ export class CoreController {
 
   protected async transcribeAudio(audioBlob: Blob) {
       console.log('Legacy audio blob size:', audioBlob.size);
+      try {
+        // Blob → base64
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        const base64 = btoa(
+          new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+        );
+
+        const langCode = this.LANGUAGE_CODE_MAP[this.currentLanguage].stt;
+        const res = await fetch(`${this.apiBase}/api/v2/rest/stt/transcribe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio: base64, language_code: langCode }),
+        });
+
+        if (!res.ok) {
+          console.error('[STT] Transcribe failed:', res.status);
+          return;
+        }
+
+        const data = await res.json();
+        const transcript = data.text || data.transcript || '';
+        if (transcript) {
+          this.els.userInput.value = transcript;
+          this.isFromVoiceInput = true;
+          this.sendMessage();
+        }
+      } catch (e) {
+        console.error('[STT] Transcribe error:', e);
+      }
   }
 
   protected stopStreamingSTT() {
