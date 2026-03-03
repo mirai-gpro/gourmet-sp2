@@ -11,8 +11,8 @@ export class ConciergeController extends CoreController {
   // Audio2Expression はバックエンドTTSエンドポイント経由で統合済み
   private pendingAckPromise: Promise<void> | null = null;
 
-  constructor(container: HTMLElement, apiBase: string) {
-    super(container, apiBase);
+  constructor(container: HTMLElement, apiBase: string, backendUrl: string = '') {
+    super(container, apiBase, backendUrl);
 
     // ★コンシェルジュモード用のAudioManagerを6.5秒設定で再初期化２
     this.audioManager = new AudioManager(8000);
@@ -254,7 +254,7 @@ export class ConciergeController extends CoreController {
   // ========================================
   protected initSocket() {
     // @ts-ignore
-    this.socket = io(this.apiBase || window.location.origin);
+    this.socket = io(this.backendUrl || this.apiBase || window.location.origin);
 
     this.socket.on('connect', () => { });
 

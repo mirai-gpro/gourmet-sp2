@@ -9,6 +9,7 @@ declare const io: any;
 export class CoreController {
   protected container: HTMLElement;
   protected apiBase: string;
+  protected backendUrl: string;
   protected audioManager: AudioManager;
   protected socket: any = null;
 
@@ -51,11 +52,12 @@ export class CoreController {
     ko: { tts: 'ko-KR', stt: 'ko-KR', voice: 'ko-KR-Wavenet-A' }
   };
 
-  constructor(container: HTMLElement, apiBase: string) {
+  constructor(container: HTMLElement, apiBase: string, backendUrl: string = '') {
     this.container = container;
     this.apiBase = apiBase;
+    this.backendUrl = backendUrl;
     this.audioManager = new AudioManager();
-    this.dialogueManager = new DialogueManager(apiBase);
+    this.dialogueManager = new DialogueManager(apiBase, backendUrl);
     this.ttsPlayer = new Audio();
 
     const query = (sel: string) => container.querySelector(sel) as HTMLElement;
@@ -313,7 +315,7 @@ export class CoreController {
   // ★修正: Socket.IO接続設定に再接続オプションを追加（transportsは削除）
   protected initSocket() {
     // @ts-ignore
-    this.socket = io(this.apiBase || window.location.origin, {
+    this.socket = io(this.backendUrl || this.apiBase || window.location.origin, {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,
