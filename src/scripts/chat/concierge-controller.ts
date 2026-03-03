@@ -17,8 +17,8 @@ export class ConciergeController extends CoreController {
     // ★コンシェルジュモード用のAudioManagerを6.5秒設定で再初期化２
     this.audioManager = new AudioManager(8000);
 
-    // コンシェルジュモードに設定（バックエンドは 'gourmet' モードのみ対応）
-    this.currentMode = 'gourmet';
+    // コンシェルジュモードに設定
+    this.currentMode = 'concierge';
     this.init();
   }
 
