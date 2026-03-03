@@ -4,6 +4,8 @@ import GourmetChat from '../components/GourmetChat.astro';
 
 // Vercel rewrites で same-origin proxy 経由
 const apiBaseUrl = '';
+// WebSocket は Vercel proxy 非対応のため、バックエンドに直接接続
+const backendUrl = 'https://support-base-32596857330.us-central1.run.app';
 ---
 
 <!DOCTYPE html>
@@ -40,7 +42,7 @@ const apiBaseUrl = '';
 </head>
 <body>
   <div class="container">
-    <GourmetChat apiBaseUrl={apiBaseUrl} />
+    <GourmetChat apiBaseUrl={apiBaseUrl} backendUrl={backendUrl} />
   </div>
 </body>
 </html>
