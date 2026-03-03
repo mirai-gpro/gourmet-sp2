@@ -199,7 +199,7 @@ export class ConciergeController extends CoreController {
 
       // ★ support_base /api/v2/ 経由でセッション開始
       const sessionInfo = await this.dialogueManager.startSession({
-        mode: 'concierge',
+        mode: 'gourmet',
         language: this.currentLanguage,
         dialogueType: this.dialogueType,
         userId: userId,
