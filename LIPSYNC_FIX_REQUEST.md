@@ -1,7 +1,7 @@
 # リップシンク調査・修正依頼書
 
-**日付**: 2026-03-04
-**対象**: support-base バックエンド
+**日付**: 2026-03-04（更新）
+**対象**: support-base バックエンド（relay.py + REST TTS）
 **報告者**: フロントエンド調査チーム
 **優先度**: P0（コンシェルジュモードの主要機能が停止中）
 
@@ -10,117 +10,139 @@
 ## 現象
 
 コンシェルジュモードでアバターのリップシンク（口の動き）が完全に動作していません。
-アバターは表示されるが、TTS音声再生時に口が一切動きません。
+アバターは表示されるが、音声再生時に口が一切動きません。
 
-**補足**: 使用中のアバターモデル (`concierge.zip`) はローカル環境で動作確認済みです。
-ローカルでは正常にリップシンクが動いていたため、アバターモデル自体に問題はありません。
-
-### コンソールログ（フロントエンド）
-
-```
-[Concierge] TTS response has NO expression data (session=sess_8a42ed204b6f)
-[LAM External] TTS play - frameBuffer has 0 frames
-[LAM Health] state=Idle, jaw=0.000, mouth=0.000, funnel=0.000, smile=0.000, pucker=0.000, buffer=0, ttsActive=true
-```
+**補足**: アバターモデル (`concierge.zip`) はローカル環境で動作確認済み。
+SDK は 3s 後に `expressionBSNum=51` で正常ロードを確認。モデルに問題なし。
 
 ---
 
-## 原因: バックエンド TTS が Expression データを返していない
+## 問題は2つ（独立した問題）
+
+### 問題A: REST TTS が Expression データを返していない
+
+**前提**: ローカル環境の REST TTS では expression 付きで正常動作していた。
 
 **エンドポイント**: `POST /api/v2/rest/tts/synthesize`
 
-**期待するレスポンス**（ローカル環境ではこれが返っていた）:
-```json
-{
-  "success": true,
-  "audio": "<base64 MP3>",
-  "expression": {
-    "names": ["jawOpen", "mouthLowerDownLeft", "mouthFunnel", ...],
-    "frames": [[0.12, 0.08, 0.05, ...], [0.15, 0.10, 0.06, ...], ...],
-    "frame_rate": 30
-  }
-}
-```
+**ヘルスチェック結果**: `a2e_available: true` ← audio2exp サービス自体は起動中
 
-**デプロイ環境の実際のレスポンス**:
+**にもかかわらず、TTS レスポンスに expression が含まれない**:
 ```json
-{
-  "success": true,
-  "audio": "<base64 MP3>"
-}
-```
+// 期待（ローカルではこれが返っていた）
+{ "success": true, "audio": "<base64>", "expression": { "names": [...], "frames": [[...], ...], "frame_rate": 30 } }
 
-**→ `expression` フィールドが完全に欠落**
+// 実際（デプロイ環境）
+{ "success": true, "audio": "<base64>" }
+// → expression フィールドが完全に欠落
+```
 
 **推定原因**:
-- `audio2exp` サービス（Audio-to-Expression 変換）がデプロイ環境で未起動 or 未接続
-- TTS → audio2exp パイプラインの接続が切れている
-- audio2exp サービスのエラーが握りつぶされている（silent fail）
-- 環境変数（`AUDIO2EXP_URL` 等）がデプロイ環境で未設定
+- TTS ハンドラ内で audio2exp 呼び出しがスキップされている（条件分岐 or 環境変数）
+- audio2exp 呼び出しが try-catch で握りつぶされている（silent fail）
+- audio2exp サービスは生きているが、TTS→audio2exp パイプラインが未接続
 
 ---
 
-## 確認・修正依頼
+### 問題B: Live API (relay.py) が expression を audio2exp で生成していない
 
-### 1. audio2exp サービスの状態確認
+**前提**: Live API で audio2exp を使うのは今回が初めて。REST API では正常動作。
 
-- [ ] `audio2exp` サービスは Cloud Run にデプロイされているか？
-- [ ] サービスは正常にヘルスチェックを通過しているか？
-- [ ] Cloud Run のログにエラーが出ていないか？
-
-### 2. TTS エンドポイントの audio2exp 連携確認
-
-- [ ] `/api/v2/rest/tts/synthesize` 内で audio2exp を呼び出すコードは有効か？
-- [ ] 環境変数 `AUDIO2EXP_URL`（または相当する設定）は正しく設定されているか？
-- [ ] audio2exp 呼び出し部分の try-catch でエラーが握りつぶされていないか？
-
-### 3. 期待するデータフロー
-
+**フロントエンドの新しいコンソールログ（次回デプロイで確認可能）**:
 ```
-フロントエンド → POST /api/v2/rest/tts/synthesize { text, language_code, voice_name, session_id }
-バックエンド   → Google Cloud TTS → MP3 音声生成
-バックエンド   → audio2exp サービス → 52ch ARKit ブレンドシェイプ生成（30fps）
-バックエンド   → レスポンス: { success: true, audio: "<base64>", expression: { names, frames, frame_rate } }
+[Live Expr RAW] chunk#1: 789 frames, 52 channels, maxVal=0.0000, jawOpen[24]=0.0000, mouthFunnel[31]=0.0000
+[LAM Live] ALL 789 frames have zero mouth values — backend may not be generating expression
 ```
 
-### 4. 検証方法
-
-```bash
-curl -X POST https://support-base-32596857330.us-central1.run.app/api/v2/rest/tts/synthesize \
-  -H "Content-Type: application/json" \
-  -d '{"text": "こんにちは", "language_code": "ja-JP", "voice_name": "ja-JP-Chirp3-HD-Leda", "session_id": "test"}' \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print('expression' in d, len(d.get('expression',{}).get('frames',[])), 'frames')"
+**現在のログ（修正前）**:
+```
+[LAM Avatar] Added 789 frames to buffer (total: 789) at 30fps
+[LAM TTS-Sync] Frame 0/789: jaw=0.000, mouth=0.000, funnel=0.000, ... time=0ms
 ```
 
-**期待結果**: `True 30 frames`（約1秒のテキストで約30フレーム）
-**現在の結果**: `False 0 frames`
+→ 789フレーム受信（フォーマットはOK）だが **全値ゼロ**。
+relay.py が expression メッセージの枠は送っているが、audio2exp で実際の表情を生成していない。
+
+**relay.py で必要な処理**:
+```python
+# Gemini Live API からの音声チャンクを受信した際:
+# 1. PCM 音声データをバッファ
+# 2. バッファが一定量溜まったら audio2exp に送信
+# 3. audio2exp のレスポンス(names, frames, frame_rate) を WebSocket で送信
+
+# WebSocket メッセージ形式:
+# { "type": "expression", "data": { "names": [...52ch...], "frames": [[...], ...], "frame_rate": 30 } }
+# ↑ この frames の中身が全ゼロではなく、実際の blendshape 値であること！
+```
 
 ---
 
-## フロントエンド側の対応状況
+## フロントエンド修正（完了済み）
+
+### 修正1: Live API Expression のリアルタイムクロック同期（今回修正）
+
+**問題**: Live API の音声は `audioIO` (Web Audio API) で再生されるが、expression 再生は `ttsPlayer.currentTime` (HTMLAudioElement) に同期していた。ttsPlayer が進まないため常にフレーム0で停止。
+
+**修正**: `queueLiveExpressionFrames()` を追加。`performance.now()` ベースでフレーム進行。
+
+### 修正2: 診断ログ追加（今回修正）
+
+- `[Live Expr RAW]`: バックエンドからの生データ（maxVal, jawOpen, mouthFunnel）
+- `[LAM Live]`: 非ゼロフレーム検出ログ
+- バックエンドの問題を即座に切り分け可能
+
+### 既存の実装状況
 
 | 項目 | 状態 | 備考 |
 |---|---|---|
-| TTS Expression 受信・適用 | ✅ 実装済み | `applyExpressionFromTts()` |
-| Live API Expression 受信 | ✅ 実装済み | `handleLiveExpression()` |
-| LAM Avatar フレームバッファ | ✅ 実装済み | `queueExpressionFrames()` + TTS時刻同期 |
-| 30fps→60fps 補間 | ✅ 実装済み | 線形補間 |
+| REST TTS Expression 受信・適用 | ✅ 実装済み | `applyExpressionFromTts()` |
+| Live API Expression 受信 | ✅ 修正済み | `handleLiveExpression()` → `queueLiveExpressionFrames()` |
+| Live API リアルタイム同期 | ✅ 新規追加 | `performance.now()` ベース |
+| 30fps→60fps 補間（REST TTS） | ✅ 実装済み | 線形補間 |
 | フェードイン/アウト | ✅ 実装済み | 6フレーム200ms |
 | FLAME LBS 安全クランプ | ✅ 実装済み | max 0.7 |
-| SDK遅延診断ログ | ✅ 追加済み | 3s/8s/15s で expressionBSNum を再チェック |
+| SDK遅延診断ログ | ✅ 追加済み | 3s/8s/15s で expressionBSNum 確認 |
+| Barge-in 時の Live Stream 停止 | ✅ 追加済み | `stopLiveStream()` |
 
-**→ バックエンドが expression データを返せば、フロントエンドは即座に動作する状態です。**
-（ローカル環境で動作確認済み）
+---
+
+## バックエンド修正依頼
+
+### 修正A: REST TTS の audio2exp 接続確認
+
+1. `/api/v2/rest/tts/synthesize` 内で audio2exp 呼び出しが有効か確認
+2. try-catch で silent fail していないかログを確認
+3. 環境変数 `AUDIO2EXP_URL` が正しく設定されているか確認
+
+**検証**:
+```bash
+curl -s -X POST https://support-base-32596857330.us-central1.run.app/api/v2/rest/tts/synthesize \
+  -H "Content-Type: application/json" \
+  -d '{"text":"こんにちは","language_code":"ja-JP","voice_name":"ja-JP-Chirp3-HD-Leda","session_id":"test"}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('has expression:', 'expression' in d)"
+```
+期待: `has expression: True`
+
+### 修正B: relay.py に Live API 用 audio2exp 連携を追加
+
+Gemini Live API の音声チャンクを audio2exp に送信し、expression データを生成して WebSocket で返す。
+
+**注意**: 現在 relay.py は expression メッセージの「枠」は送信しているが中身がゼロ。audio2exp の実呼出しが必要。
 
 ---
 
 ## 完了チェックリスト
 
-- [ ] audio2exp サービスがデプロイ環境で起動している
-- [ ] TTS エンドポイントの環境変数が正しく設定されている
-- [ ] curl テストで expression フィールドが返る
+### REST TTS
+- [ ] curl テストで `expression` フィールドが返る（frames の中身が非ゼロ）
 - [ ] フロントエンドで `[Concierge] Expression: XX→YY frames` が出力される
-- [ ] アバターの口が TTS 音声に同期して動く
+- [ ] 初回挨拶で口が動く
+
+### Live API
+- [ ] `[Live Expr RAW]` ログで `maxVal > 0` を確認
+- [ ] `[LAM Live]` ログで `non-zero mouth values` を確認
+- [ ] `[LAM Live-Sync]` ログで `jaw > 0` を確認
+- [ ] 会話中に口が動く
 
 ---
 
@@ -129,15 +151,8 @@ curl -X POST https://support-base-32596857330.us-central1.run.app/api/v2/rest/tt
 別件として、グルメモードの音声認識品質が低下しています。
 
 **現象**: 「恵比寿のおいしい焼き鳥や」→「エビス の 石 焼き鳥 や」と誤認識
-**原因**: Socket.IO STT (Google Cloud STT) が 404 で使用不可のため、Gemini Live API 内蔵 STT のみで認識している
-
-```
-[Socket.IO] Not available — using REST STT fallback
-```
-
-Gemini の内蔵 STT は日本語認識において Google Cloud STT ほどの精度がない可能性があります。
+**原因**: Socket.IO STT (Google Cloud STT) が 404 で使用不可
 
 **対策候補**:
 1. Socket.IO STT (Google Cloud STT) エンドポイントを復活させる
-2. relay.py の Gemini セッション設定で `speech_config` の `language_code` を明示的に `ja-JP` に設定する
-3. Gemini Live API のシステムプロンプトで日本語認識精度を改善する
+2. relay.py で `speech_config` の `language_code` を明示的に `ja-JP` に設定する
