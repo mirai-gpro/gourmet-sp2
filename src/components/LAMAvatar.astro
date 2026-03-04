@@ -472,10 +472,36 @@ class LAMAvatarController {
         console.log(`[SDK] flameModelTextureSize = ${flameTexSize?.x}x${flameTexSize?.y}`);
       }
       console.log('=== END SDK INTERNALS ===');
+
+      // ★ 遅延診断: モデルロード完了後にmorphTargetDictionaryが構築されるか確認
+      // expressionBSNum=0 の場合、audio2expが動いてもリップシンクは反映されない
+      const delayChecks = [3000, 8000, 15000];
+      delayChecks.forEach((delay) => {
+        setTimeout(() => {
+          const mesh = this.renderer?.viewer?.splatMesh;
+          if (!mesh) return;
+          const bs = mesh.expressionBSNum;
+          const dict = mesh.morphTargetDictionary;
+          const bsU = mesh.material?.uniforms?.bsCount?.value;
+          const dictCount = dict ? Object.keys(dict).length : 0;
+          console.log(
+            `[SDK DELAYED ${delay / 1000}s] expressionBSNum=${bs}, ` +
+            `morphTargetDictionary=${dictCount} entries, bsCount=${bsU}`
+          );
+          if (dict && dictCount > 0 && !this._delayedDictLogged) {
+            this._delayedDictLogged = true;
+            Object.keys(dict).forEach((k) => {
+              console.log(`[SDK DELAYED]   [${dict[k]}] ${k}`);
+            });
+          }
+        }, delay);
+      });
     } catch (e) {
       console.warn('[SDK] Failed to log internals:', e);
     }
   }
+
+  private _delayedDictLogged = false;
 
   /**
    * SDK汚染対策: SDKが返却オブジェクトにFLAME LBS計算結果を書き戻す場合、
