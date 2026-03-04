@@ -97,8 +97,9 @@ export class DialogueManager {
 
     const url = `${this.apiBase}/api/v2/session/start`;
 
+    // Live API は 'gourmet' のみ対応。concierge はフロントエンド側の区別。
     const payload = {
-      mode: this.mode,
+      mode: 'gourmet',
       language: this.language,
       dialogue_type: this.dialogueType,
       user_id: params.userId || null,
