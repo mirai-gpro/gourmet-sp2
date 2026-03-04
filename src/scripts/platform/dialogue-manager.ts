@@ -52,6 +52,7 @@ export interface TTSResponse {
     frames: any[];
     frame_rate: number;
   };
+  expression_status?: string;  // "ok" | "error" | "timeout" etc.
 }
 
 export interface ExpressionData {

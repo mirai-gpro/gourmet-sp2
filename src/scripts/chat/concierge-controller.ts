@@ -347,9 +347,10 @@ export class ConciergeController extends CoreController {
       if (data.success && data.audio) {
         // ★ TTS応答に同梱されたExpressionを即バッファ投入（遅延ゼロ）
         if (data.expression) {
+          console.log(`[Concierge] Expression: status=${data.expression_status || 'n/a'}, ${data.expression.frames?.length || 0} frames`);
           this.applyExpressionFromTts(data.expression);
         } else {
-          console.warn(`[Concierge] TTS response has NO expression data (session=${this.sessionId})`);
+          console.warn(`[Concierge] TTS response has NO expression data (status=${data.expression_status || 'n/a'}, session=${this.sessionId})`);
         }
         this.ttsPlayer.src = `data:audio/mp3;base64,${data.audio}`;
         const playPromise = new Promise<void>((resolve) => {
