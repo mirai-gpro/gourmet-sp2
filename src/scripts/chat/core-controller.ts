@@ -141,6 +141,9 @@ export class CoreController {
       this.isAISpeaking = false;
       this.ttsPlayer.pause();
       this.ttsPlayer.currentTime = 0;
+      // Live API expression のリアルタイム同期を停止
+      const lam = (window as any).lamAvatarController;
+      if (lam?.stopLiveStream) lam.stopLiveStream();
     });
 
     // 再接続

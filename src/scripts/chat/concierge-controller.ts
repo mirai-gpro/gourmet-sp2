@@ -159,13 +159,33 @@ export class ConciergeController extends CoreController {
   }
 
   // ========================================
-  // ★ Live API Expression 受信: LAMAvatar に投入
+  // ★ Live API Expression 受信: LAMAvatar に投入 (リアルタイムクロック同期)
   // ========================================
+  private liveExpressionChunkCount = 0;
+
   protected handleLiveExpression(data: ExpressionData): void {
     const lamController = (window as any).lamAvatarController;
     if (!lamController || !data?.names || !data?.frames?.length) return;
 
     const frameRate = data.frame_rate || 30;
+    this.liveExpressionChunkCount++;
+
+    // ★ 生データ診断: 最初の3チャンクをログ
+    if (this.liveExpressionChunkCount <= 3) {
+      const firstFrame = data.frames[0];
+      const values: number[] = Array.isArray(firstFrame) ? firstFrame : (firstFrame?.weights || []);
+      const maxVal = Math.max(...values.map(v => Math.abs(v || 0)));
+      const jawIdx = data.names.indexOf('jawOpen');
+      const funnelIdx = data.names.indexOf('mouthFunnel');
+      console.log(
+        `[Live Expr RAW] chunk#${this.liveExpressionChunkCount}: ` +
+        `${data.frames.length} frames, ${data.names.length} channels, ` +
+        `maxVal=${maxVal.toFixed(4)}, ` +
+        `jawOpen[${jawIdx}]=${(values[jawIdx] || 0).toFixed(4)}, ` +
+        `mouthFunnel[${funnelIdx}]=${(values[funnelIdx] || 0).toFixed(4)}, ` +
+        `first5vals=[${values.slice(0, 5).map(v => (v||0).toFixed(3)).join(',')}]`
+      );
+    }
 
     // Live API の expression は REST と同じフォーマット
     // relay.py: { names, frames, frame_rate }
@@ -180,8 +200,8 @@ export class ConciergeController extends CoreController {
       return frame;
     });
 
-    // Live API はストリーミングなので append（clearFrameBuffer しない）
-    lamController.queueExpressionFrames(frames, frameRate);
+    // ★ Live API はリアルタイムクロック同期を使用（ttsPlayerは不使用）
+    lamController.queueLiveExpressionFrames(frames, frameRate);
   }
 
   // ========================================
@@ -189,6 +209,9 @@ export class ConciergeController extends CoreController {
   // ========================================
   protected async initializeSession() {
     try {
+      // Live expression チャンクカウンターリセット
+      this.liveExpressionChunkCount = 0;
+
       // 既存セッション終了
       if (this.sessionId) {
         try {
