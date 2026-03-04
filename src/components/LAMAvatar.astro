@@ -656,6 +656,8 @@ class LAMAvatarController {
         // 2秒以上新チャンクなし → ストリーム終了
         console.log(`[LAM Live] Stream ended (no new chunks for ${waitMs.toFixed(0)}ms)`);
         this.liveStreamStartTime = null;
+        this.liveStreamConsumedIndex = 0;
+        this.frameBuffer = [];  // ★ バッファクリア（TTS-Sync モードでのリプレイ防止）
         this.fadeOutStartTime = performance.now();
       }
     }
