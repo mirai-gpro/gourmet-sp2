@@ -1,158 +1,212 @@
-# リップシンク調査・修正依頼書
+# リップシンク改善依頼書（v3）
 
-**日付**: 2026-03-04（更新）
+**日付**: 2026-03-04（第3版）
 **対象**: support-base バックエンド（relay.py + REST TTS）
 **報告者**: フロントエンド調査チーム
-**優先度**: P0（コンシェルジュモードの主要機能が停止中）
+**優先度**: P1（リップシンクは動作するが品質に問題あり）
 
 ---
 
-## 現象
+## 解決済みの問題
 
-コンシェルジュモードでアバターのリップシンク（口の動き）が完全に動作していません。
-アバターは表示されるが、音声再生時に口が一切動きません。
+| # | 問題 | 状態 |
+|---|------|------|
+| ~~A~~ | ~~Live API expression が全値ゼロ~~ | **解決済み** maxVal=0.15 |
+| ~~B~~ | ~~Expression が音声終了後に一括到着~~ | **解決済み** ストリーミング化完了 |
+| ~~C~~ | ~~Live API expression の同期ズレ~~ | **解決済み** audioStartTime 同期 |
+| ~~D~~ | ~~TTS-Sync リプレイによる二重再生~~ | **解決済み** バッファクリア |
 
-**補足**: アバターモデル (`concierge.zip`) はローカル環境で動作確認済み。
-SDK は 3s 後に `expressionBSNum=51` で正常ロードを確認。モデルに問題なし。
+### 動作確認ログ（2026-03-04 最新）
+
+```
+[Live Expr RAW] chunk#1: 45 frames, 52 channels, maxVal=0.1358, jawOpen[24]=0.0150
+[Live Expr RAW] chunk#2: 45 frames, 52 channels, maxVal=0.1538, jawOpen[24]=0.0134
+[Live Expr RAW] chunk#3: 45 frames, 52 channels, maxVal=0.1481, jawOpen[24]=0.0013
+... 計6チャンク、310フレーム（~10.3秒分）
+→ ストリーミング・非ゼロ値・タイミング同期、すべて正常動作
+```
 
 ---
 
-## 問題は2つ（独立した問題）
+## 残存する問題（3件）
 
-### 問題A: REST TTS が Expression データを返していない
+### 問題1: REST TTS の expression が status=error（P0）
 
-**前提**: ローカル環境の REST TTS では expression 付きで正常動作していた。
-
-**エンドポイント**: `POST /api/v2/rest/tts/synthesize`
-
-**ヘルスチェック結果**: `a2e_available: true` ← audio2exp サービス自体は起動中
-
-**にもかかわらず、TTS レスポンスに expression が含まれない**:
-```json
-// 期待（ローカルではこれが返っていた）
-{ "success": true, "audio": "<base64>", "expression": { "names": [...], "frames": [[...], ...], "frame_rate": 30 } }
-
-// 実際（デプロイ環境）
-{ "success": true, "audio": "<base64>" }
-// → expression フィールドが完全に欠落
+**現象**:
+```
+[Concierge] TTS response has NO expression data (status=error, session=sess_912e582ab676)
+[LAM External] TTS play - frameBuffer has 0 frames  ← 初回挨拶で口が全く動かない
 ```
 
-**推定原因**:
-- TTS ハンドラ内で audio2exp 呼び出しがスキップされている（条件分岐 or 環境変数）
-- audio2exp 呼び出しが try-catch で握りつぶされている（silent fail）
-- audio2exp サービスは生きているが、TTS→audio2exp パイプラインが未接続
+初回挨拶（セッション開始時のウェルカムメッセージ）は REST TTS 経路を使う。
+この経路で expression 生成が失敗するため、最初の挨拶で口が一切動かない。
 
----
+**影響**: ユーザーの第一印象に直結。最初の挨拶で口が動かないとバグに見える。
 
-### 問題B: Live API (relay.py) が expression を audio2exp で生成していない
-
-**前提**: Live API で audio2exp を使うのは今回が初めて。REST API では正常動作。
-
-**フロントエンドの新しいコンソールログ（次回デプロイで確認可能）**:
-```
-[Live Expr RAW] chunk#1: 789 frames, 52 channels, maxVal=0.0000, jawOpen[24]=0.0000, mouthFunnel[31]=0.0000
-[LAM Live] ALL 789 frames have zero mouth values — backend may not be generating expression
+**調査ポイント**:
+```bash
+# Cloud Run ログで expression error の原因を確認
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="support-base" AND textPayload=~"a2e|expression|error"' \
+  --limit=30 --format="table(timestamp,textPayload)"
 ```
 
-**現在のログ（修正前）**:
-```
-[LAM Avatar] Added 789 frames to buffer (total: 789) at 30fps
-[LAM TTS-Sync] Frame 0/789: jaw=0.000, mouth=0.000, funnel=0.000, ... time=0ms
-```
+**想定される原因**:
+- TTS 音声（MP3）→ audio2exp 変換時のフォーマットエラー
+- audio2exp サービスのタイムアウト
+- TTS 音声が短すぎて expression 生成不可（「こんにちは」は ~1秒）
+- try-catch で silent fail しており、`expression_status: "error"` だけ返している
 
-→ 789フレーム受信（フォーマットはOK）だが **全値ゼロ**。
-relay.py が expression メッセージの枠は送っているが、audio2exp で実際の表情を生成していない。
-
-**relay.py で必要な処理**:
+**修正方針**:
 ```python
-# Gemini Live API からの音声チャンクを受信した際:
-# 1. PCM 音声データをバッファ
-# 2. バッファが一定量溜まったら audio2exp に送信
-# 3. audio2exp のレスポンス(names, frames, frame_rate) を WebSocket で送信
-
-# WebSocket メッセージ形式:
-# { "type": "expression", "data": { "names": [...52ch...], "frames": [[...], ...], "frame_rate": 30 } }
-# ↑ この frames の中身が全ゼロではなく、実際の blendshape 値であること！
+# エラー時のログを詳細化して原因を特定
+try:
+    expression = await a2e_service.process(audio_bytes)
+except Exception as e:
+    logger.error(f"[TTS] audio2exp failed: {e}", exc_info=True)
+    # ↑ exc_info=True でスタックトレースを出力
 ```
 
 ---
 
-## フロントエンド修正（完了済み）
+### 問題2: Live API expression の初回遅延 ~500ms（P2）
 
-### 修正1: Live API Expression のリアルタイムクロック同期（今回修正）
+**現象**:
+```
+[Core] First audio chunk received at 23580ms          ← 音声再生開始
+[LAM Live] Stream started — synced to audio start (535ms ago)  ← 535ms後にexpression到着
+→ 最初の15フレーム（~500ms）分は口が動かない
+```
 
-**問題**: Live API の音声は `audioIO` (Web Audio API) で再生されるが、expression 再生は `ttsPlayer.currentTime` (HTMLAudioElement) に同期していた。ttsPlayer が進まないため常にフレーム0で停止。
+**原因**: relay.py が 1.5秒分（BYTES_PER_SEC * 1.5 = 72000 bytes）の音声をバッファしてから
+audio2exp に送信するため、最初の expression チャンクが ~500ms 遅れて到着する。
 
-**修正**: `queueLiveExpressionFrames()` を追加。`performance.now()` ベースでフレーム進行。
+**影響**: 会話の最初の0.5秒間、音声は聞こえるが口が動かない。
 
-### 修正2: 診断ログ追加（今回修正）
+**改善案**: バッファサイズを **1.5秒 → 0.75秒** に縮小:
+```python
+# 現在
+CHUNK_SIZE = 24000 * 2 * 1.5  # 1.5秒分 = 72000 bytes
 
-- `[Live Expr RAW]`: バックエンドからの生データ（maxVal, jawOpen, mouthFunnel）
-- `[LAM Live]`: 非ゼロフレーム検出ログ
-- バックエンドの問題を即座に切り分け可能
+# 改善
+CHUNK_SIZE = 24000 * 2 * 0.75  # 0.75秒分 = 36000 bytes
+# → expression の到着が ~250ms 早まる
+```
 
-### 既存の実装状況
-
-| 項目 | 状態 | 備考 |
-|---|---|---|
-| REST TTS Expression 受信・適用 | ✅ 実装済み | `applyExpressionFromTts()` |
-| Live API Expression 受信 | ✅ 修正済み | `handleLiveExpression()` → `queueLiveExpressionFrames()` |
-| Live API リアルタイム同期 | ✅ 新規追加 | `performance.now()` ベース |
-| 30fps→60fps 補間（REST TTS） | ✅ 実装済み | 線形補間 |
-| フェードイン/アウト | ✅ 実装済み | 6フレーム200ms |
-| FLAME LBS 安全クランプ | ✅ 実装済み | max 0.7 |
-| SDK遅延診断ログ | ✅ 追加済み | 3s/8s/15s で expressionBSNum 確認 |
-| Barge-in 時の Live Stream 停止 | ✅ 追加済み | `stopLiveStream()` |
+**トレードオフ**:
+- チャンクが短いと audio2exp の精度が下がる可能性
+- audio2exp API コール数が増加（1.5秒チャンクの2倍）
+- まず 1.0秒で試して品質を確認することを推奨
 
 ---
 
-## バックエンド修正依頼
+### 問題3: Live API expression の末尾欠落（P2）
 
-### 修正A: REST TTS の audio2exp 接続確認
+**現象**:
+```
+[LAM Live] +40 frames (total: 310) at 30fps       ← 最後のチャンク（40フレーム）
+[LAM Live] Stream ended (no new chunks for 2014ms) ← 2秒後にストリーム終了
+... でも音声バッファにはまだ再生中のデータがある可能性
+```
 
-1. `/api/v2/rest/tts/synthesize` 内で audio2exp 呼び出しが有効か確認
-2. try-catch で silent fail していないかログを確認
-3. 環境変数 `AUDIO2EXP_URL` が正しく設定されているか確認
+310フレーム / 30fps = 10.33秒分の expression だが、音声は ~11-12秒の場合がある。
+最後の 1-2秒間、音声は再生中だが口が動かない。
 
-**検証**:
+**原因**: `turn_complete` 時にバッファに残っている音声が少なすぎて
+audio2exp が有効な expression を生成できない、またはそもそも処理されていない。
+
+**改善案**: `turn_complete` 時に残りバッファを強制的に処理:
+```python
+if sc.turn_complete:
+    # 残りのバッファも処理（短くても送信）
+    if self._audio_buffer:
+        chunk = bytes(self._audio_buffer)
+        self._audio_buffer = bytearray()
+        # is_final=True で audio2exp に最終チャンクであることを伝える
+        await self._send_expression_chunk(chunk, is_final=True)
+    self._total_audio_bytes = 0
+```
+
+---
+
+## 補足: jawOpen 値の範囲について
+
+現在の audio2exp の出力で、jawOpen は 0.01~0.35 の範囲。
+フロントエンドは 0.7 でクランプしているため、jawOpen=0.35 は見た目上 50% の開口。
+これは許容範囲だが、もし audio2exp のパラメータで出力スケールを調整できるなら
+jawOpen を 1.5倍にすると見栄えが改善する可能性がある。
+
+ただし、これはフロントエンドでの乗算でも対応可能なため、バックエンド対応は**任意**。
+
+---
+
+## フロントエンド側の対応状況
+
+| 項目 | 状態 |
+|---|---|
+| REST TTS Expression 受信・適用 | 実装済み（バックエンドが返せば即動作） |
+| Live API Expression ストリーミング受信 | 実装済み・動作確認済み |
+| Live API リアルタイム audioStartTime 同期 | 実装済み・動作確認済み |
+| 30fps→60fps 補間（REST TTS） | 実装済み |
+| フェードイン/アウト | 実装済み（6フレーム 200ms） |
+| TTS-Sync リプレイ抑止 | 修正済み |
+| FLAME LBS 安全クランプ | 実装済み（max 0.7） |
+| barge-in 時の Live Stream 停止 | 実装済み |
+
+---
+
+## 検証方法
+
+### 問題1（REST TTS expression=error）
+
 ```bash
 curl -s -X POST https://support-base-32596857330.us-central1.run.app/api/v2/rest/tts/synthesize \
   -H "Content-Type: application/json" \
   -d '{"text":"こんにちは","language_code":"ja-JP","voice_name":"ja-JP-Chirp3-HD-Leda","session_id":"test"}' \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print('has expression:', 'expression' in d)"
+  | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'expression' in d:
+    e = d['expression']
+    print(f'OK: {len(e[\"names\"])} channels, {len(e[\"frames\"])} frames')
+    max_val = max(max(abs(v) for v in f) for f in e['frames'])
+    print(f'Max value: {max_val:.4f} (should be > 0)')
+else:
+    print('NG: expression field missing')
+    print('Keys:', list(d.keys()))
+"
 ```
-期待: `has expression: True`
 
-### 修正B: relay.py に Live API 用 audio2exp 連携を追加
+### 問題2・3（Live API タイミング改善）
 
-Gemini Live API の音声チャンクを audio2exp に送信し、expression データを生成して WebSocket で返す。
+ブラウザコンソールで以下を確認:
+```
+# 改善前（現在）
+[LAM Live] Stream started — synced to audio start (535ms ago)  ← 535ms 遅延
 
-**注意**: 現在 relay.py は expression メッセージの「枠」は送信しているが中身がゼロ。audio2exp の実呼出しが必要。
+# 改善後（期待値）
+[LAM Live] Stream started — synced to audio start (250ms ago)  ← 250ms に短縮
+
+# 末尾: 最後のチャンクが turn_complete 後すぐに到着すること
+[LAM Live] +XX frames (total: YYY) at 30fps
+# ↑ YYY / 30 ≒ 音声の総秒数 であること
+```
 
 ---
 
 ## 完了チェックリスト
 
-### REST TTS
-- [ ] curl テストで `expression` フィールドが返る（frames の中身が非ゼロ）
-- [ ] フロントエンドで `[Concierge] Expression: XX→YY frames` が出力される
-- [ ] 初回挨拶で口が動く
+### P0: REST TTS expression
+- [ ] Cloud Run ログで expression_status=error の原因を特定
+- [ ] audio2exp 呼び出しのエラーを修正
+- [ ] curl テストで `expression` フィールドが返る（frames が非ゼロ）
+- [ ] フロントエンドで初回挨拶時に口が動く
 
-### Live API
-- [ ] `[Live Expr RAW]` ログで `maxVal > 0` を確認
-- [ ] `[LAM Live]` ログで `non-zero mouth values` を確認
-- [ ] `[LAM Live-Sync]` ログで `jaw > 0` を確認
-- [ ] 会話中に口が動く
+### P2: Live API タイミング改善
+- [ ] 初回チャンクのバッファサイズを 1.5秒 → 0.75~1.0秒 に縮小
+- [ ] `turn_complete` 時に残りバッファの強制処理を確認
+- [ ] フロントエンドの初回遅延が ~250ms に改善
+- [ ] 音声終了と expression 終了のタイミングが一致
 
----
-
-## 補足: STT品質の低下について
-
-別件として、グルメモードの音声認識品質が低下しています。
-
-**現象**: 「恵比寿のおいしい焼き鳥や」→「エビス の 石 焼き鳥 や」と誤認識
-**原因**: Socket.IO STT (Google Cloud STT) が 404 で使用不可
-
-**対策候補**:
-1. Socket.IO STT (Google Cloud STT) エンドポイントを復活させる
-2. relay.py で `speech_config` の `language_code` を明示的に `ja-JP` に設定する
+### 任意: jawOpen スケーリング
+- [ ] audio2exp の jawOpen 出力スケールを確認（調整可能か）
