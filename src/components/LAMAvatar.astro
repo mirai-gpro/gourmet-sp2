@@ -618,18 +618,8 @@ class LAMAvatarController {
         const fadeAlpha = frameIndex < this.FADE_IN_FRAMES
           ? frameIndex / this.FADE_IN_FRAMES
           : 1.0;
-        // audio2exp の jawOpen 値が低い（0.01-0.03）ため、口の開きが見えにくい
-        // jawOpen を増幅して視覚的なリップシンクを改善
-        const JAW_BOOST = 3.0;
-        const MOUTH_BOOST = 1.3;
         Object.keys(frame).forEach((name: string) => {
-          let val = frame[name] * fadeAlpha;
-          if (name === 'jawOpen') {
-            val = Math.min(val * JAW_BOOST, 0.7);
-          } else if (name === 'mouthLowerDownLeft' || name === 'mouthLowerDownRight') {
-            val = Math.min(val * MOUTH_BOOST, 0.7);
-          }
-          this.expressionData[name] = val;
+          this.expressionData[name] = frame[name] * fadeAlpha;
         });
         this.liveStreamConsumedIndex = frameIndex;
 
@@ -640,7 +630,7 @@ class LAMAvatarController {
             `[LAM Live-Sync] Frame ${frameIndex}/${this.frameBuffer.length}: ` +
             `jaw=${(f['jawOpen']||0).toFixed(3)}, mouth=${(f['mouthLowerDownLeft']||0).toFixed(3)}, ` +
             `funnel=${(f['mouthFunnel']||0).toFixed(3)}, smile=${(f['mouthSmileLeft']||0).toFixed(3)}, ` +
-            `pucker=${(f['mouthPucker']||0).toFixed(3)}, close=${(f['mouthClose']||0).toFixed(3)}, elapsed=${elapsedMs.toFixed(0)}ms`
+            `pucker=${(f['mouthPucker']||0).toFixed(3)}, elapsed=${elapsedMs.toFixed(0)}ms`
           );
         }
 
@@ -689,16 +679,8 @@ class LAMAvatarController {
           const fadeAlpha = frameIndex < this.FADE_IN_FRAMES
             ? frameIndex / this.FADE_IN_FRAMES
             : 1.0;
-          const JAW_BOOST = 3.0;
-          const MOUTH_BOOST = 1.3;
           Object.keys(frame).forEach((name: string) => {
-            let val = frame[name] * fadeAlpha;
-            if (name === 'jawOpen') {
-              val = Math.min(val * JAW_BOOST, 0.7);
-            } else if (name === 'mouthLowerDownLeft' || name === 'mouthLowerDownRight') {
-              val = Math.min(val * MOUTH_BOOST, 0.7);
-            }
-            this.expressionData[name] = val;
+            this.expressionData[name] = frame[name] * fadeAlpha;
           });
 
           // ★ SDK全52ch対応判明: remapForSdkLimitation() は不要
@@ -822,19 +804,6 @@ class LAMAvatarController {
   public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioStartTime?: number | null): void {
     if (!frames || frames.length === 0) return;
 
-    // 全フレームがゼロの場合はスキップ（ターン間の偽チャンクを除外）
-    const hasAnyNonZero = frames.some(f => {
-      const jaw = f['jawOpen'] || 0;
-      const mouth = f['mouthLowerDownLeft'] || 0;
-      const funnel = f['mouthFunnel'] || 0;
-      const pucker = f['mouthPucker'] || 0;
-      return jaw > 0.001 || mouth > 0.001 || funnel > 0.001 || pucker > 0.001;
-    });
-    if (!hasAnyNonZero) {
-      console.warn(`[LAM Live] Skipping ${frames.length} all-zero frames (spurious chunk)`);
-      return;
-    }
-
     if (this.liveStreamStartTime === null) {
       // 音声開始時刻が提供されている場合はそれを基準にする
       // （バックエンドが turn_complete 後に一括送信する場合の対策）
@@ -858,9 +827,8 @@ class LAMAvatarController {
     let nonZeroCount = 0;
     frames.forEach(f => {
       const jaw = f['jawOpen'] || 0;
-      const mouth = f['mouthLowerDownLeft'] || 0;
       const funnel = f['mouthFunnel'] || 0;
-      if (jaw > 0.005 || mouth > 0.01 || funnel > 0.01) nonZeroCount++;
+      if (jaw > 0.01 || funnel > 0.01) nonZeroCount++;
     });
     if (nonZeroCount > 0) {
       console.log(`[LAM Live] ${nonZeroCount}/${frames.length} frames have non-zero mouth values`);
