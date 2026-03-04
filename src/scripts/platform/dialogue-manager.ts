@@ -75,6 +75,9 @@ export class DialogueManager {
   private wsClient: LiveWSClient | null = null;
   private audioIO: LiveAudioIO | null = null;
 
+  // Live API 音声再生開始時刻（expression 同期用）
+  private _liveAudioStartTime: number | null = null;
+
   // イベントハンドラ
   private eventHandlers: Map<string, EventHandler[]> = new Map();
 
@@ -261,6 +264,11 @@ export class DialogueManager {
 
     this.wsClient.on('audio', (msg: LiveWSMessage) => {
       if (msg.data && this.audioIO) {
+        // 最初の音声チャンク受信時刻を記録（expression 同期用）
+        if (this._liveAudioStartTime === null) {
+          this._liveAudioStartTime = performance.now();
+          console.log(`[DialogueManager] First audio chunk received at ${this._liveAudioStartTime.toFixed(0)}ms`);
+        }
         this.audioIO.queuePlayback(msg.data);
       }
       this.emit('ai_audio', msg.data);
@@ -268,6 +276,8 @@ export class DialogueManager {
 
     this.wsClient.on('transcription', (msg: LiveWSMessage) => {
       if (msg.role === 'user') {
+        // ユーザーが話し始めた → 次のAIターンに備えて音声開始時刻リセット
+        this._liveAudioStartTime = null;
         this.emit('user_text', { text: msg.text, isPartial: msg.is_partial });
       } else if (msg.role === 'ai') {
         this.emit('ai_text', { text: msg.text, isPartial: msg.is_partial });
@@ -275,6 +285,12 @@ export class DialogueManager {
     });
 
     this.wsClient.on('expression', (msg: LiveWSMessage) => {
+      // 音声開始時刻を付与して expression を送出
+      // バックエンドが turn_complete 後に一括送信する場合でも、
+      // 音声再生開始時刻を基準に同期できる
+      if (msg.data) {
+        msg.data._audioStartTime = this._liveAudioStartTime;
+      }
       this.emit('expression', msg.data);
     });
 
@@ -282,6 +298,7 @@ export class DialogueManager {
       if (this.audioIO) {
         this.audioIO.stopPlayback();
       }
+      this._liveAudioStartTime = null;  // 次のターンに備えてリセット
       this.emit('interrupted', null);
     });
 
@@ -409,5 +426,10 @@ export class DialogueManager {
 
   get liveAudioIO(): LiveAudioIO | null {
     return this.audioIO;
+  }
+
+  /** Live API 音声再生開始時刻をリセット（ターン終了時に呼ぶ） */
+  resetLiveAudioStartTime(): void {
+    this._liveAudioStartTime = null;
   }
 }

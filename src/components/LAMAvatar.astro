@@ -794,16 +794,28 @@ class LAMAvatarController {
    * Live API のオーディオは audioIO (Web Audio API) 経由で再生されるため、
    * ttsPlayer.currentTime は使えない。リアルタイムクロックで同期する。
    */
-  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30): void {
+  /**
+   * audioStartTime: performance.now() timestamp when first audio chunk was received.
+   * If provided, expression playback syncs to audio start (not expression arrival).
+   * This handles the case where backend sends expression after audio finishes.
+   */
+  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioStartTime?: number | null): void {
     if (!frames || frames.length === 0) return;
 
     if (this.liveStreamStartTime === null) {
-      // 最初のチャンク: リアルタイムクロック開始
-      this.liveStreamStartTime = performance.now();
+      // 音声開始時刻が提供されている場合はそれを基準にする
+      // （バックエンドが turn_complete 後に一括送信する場合の対策）
+      if (audioStartTime != null && audioStartTime > 0) {
+        this.liveStreamStartTime = audioStartTime;
+        const delay = performance.now() - audioStartTime;
+        console.log(`[LAM Live] Stream started — synced to audio start (${delay.toFixed(0)}ms ago), ${frames.length} frames at ${frameRate}fps`);
+      } else {
+        this.liveStreamStartTime = performance.now();
+        console.log(`[LAM Live] Stream started — first ${frames.length} frames at ${frameRate}fps`);
+      }
       this.liveStreamConsumedIndex = 0;
       this.frameBuffer = [];
       this.frameRate = frameRate;
-      console.log(`[LAM Live] Stream started — first ${frames.length} frames at ${frameRate}fps`);
     }
 
     this.frameBuffer = this.frameBuffer.concat(frames);

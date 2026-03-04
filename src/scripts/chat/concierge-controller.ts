@@ -201,7 +201,10 @@ export class ConciergeController extends CoreController {
     });
 
     // ★ Live API はリアルタイムクロック同期を使用（ttsPlayerは不使用）
-    lamController.queueLiveExpressionFrames(frames, frameRate);
+    // _audioStartTime: 音声再生開始時刻（DialogueManager が付与）
+    // バックエンドが turn_complete 後に一括送信する場合、音声開始時刻を基準に同期する
+    const audioStartTime = (data as any)._audioStartTime || null;
+    lamController.queueLiveExpressionFrames(frames, frameRate, audioStartTime);
   }
 
   // ========================================
