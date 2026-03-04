@@ -174,6 +174,10 @@ class LAMAvatarController {
   private ttsLastCurrentTime: number = 0;
   private ttsTransitioning: boolean = false; // TTS切替中フラグ（早期fade-out防止）
 
+  // Live API real-time sync (ttsPlayerを使わないケース)
+  private liveStreamStartTime: number | null = null;
+  private liveStreamConsumedIndex: number = 0;
+
   // Frame buffer for expression
   private frameBuffer: ExpressionData[] = [];
   private frameRate: number = 30;
@@ -603,6 +607,59 @@ class LAMAvatarController {
       return this.safeReturnExpression();
     }
 
+    // Live API real-time sync: performance.now() でフレーム進行
+    if (this.liveStreamStartTime !== null && this.frameBuffer.length > 0) {
+      const elapsedMs = performance.now() - this.liveStreamStartTime;
+      const frameIndex = Math.floor((elapsedMs / 1000) * this.frameRate);
+
+      if (frameIndex >= 0 && frameIndex < this.frameBuffer.length) {
+        this.expressionData = {};
+        const frame = this.frameBuffer[frameIndex];
+        const fadeAlpha = frameIndex < this.FADE_IN_FRAMES
+          ? frameIndex / this.FADE_IN_FRAMES
+          : 1.0;
+        Object.keys(frame).forEach((name: string) => {
+          this.expressionData[name] = frame[name] * fadeAlpha;
+        });
+        this.liveStreamConsumedIndex = frameIndex;
+
+        if (frameIndex !== this.lastLoggedFrameIndex && frameIndex % 10 === 0) {
+          this.lastLoggedFrameIndex = frameIndex;
+          const f = this.expressionData;
+          console.log(
+            `[LAM Live-Sync] Frame ${frameIndex}/${this.frameBuffer.length}: ` +
+            `jaw=${(f['jawOpen']||0).toFixed(3)}, mouth=${(f['mouthLowerDownLeft']||0).toFixed(3)}, ` +
+            `funnel=${(f['mouthFunnel']||0).toFixed(3)}, smile=${(f['mouthSmileLeft']||0).toFixed(3)}, ` +
+            `pucker=${(f['mouthPucker']||0).toFixed(3)}, elapsed=${elapsedMs.toFixed(0)}ms`
+          );
+        }
+
+        if (this.currentState !== 'Responding') {
+          this.setChatState('Responding');
+        }
+        return this.safeReturnExpression();
+
+      } else if (frameIndex >= this.frameBuffer.length) {
+        // バッファ末端到達 — 新しいチャンクが来るか待つ（最大2秒）
+        const waitMs = elapsedMs - (this.frameBuffer.length / this.frameRate * 1000);
+        if (waitMs < 2000) {
+          // 最後のフレームをホールド
+          const lastFrame = this.frameBuffer[this.frameBuffer.length - 1];
+          if (lastFrame) {
+            this.expressionData = {};
+            Object.keys(lastFrame).forEach((name: string) => {
+              this.expressionData[name] = lastFrame[name];
+            });
+          }
+          return this.safeReturnExpression();
+        }
+        // 2秒以上新チャンクなし → ストリーム終了
+        console.log(`[LAM Live] Stream ended (no new chunks for ${waitMs.toFixed(0)}ms)`);
+        this.liveStreamStartTime = null;
+        this.fadeOutStartTime = performance.now();
+      }
+    }
+
     // TTS sync mode: index frameBuffer by ttsPlayer.currentTime
     if (this.syncMode === 'external' && this.externalTtsPlayer && this.frameBuffer.length > 0) {
       const currentTimeMs = this.externalTtsPlayer.currentTime * 1000;
@@ -718,7 +775,7 @@ class LAMAvatarController {
   }
 
   /**
-   * Queue expression frames from REST API
+   * Queue expression frames from REST API (TTS-sync: ttsPlayer.currentTime で再生)
    * Frames are appended to frameBuffer for TTS-sync playback
    */
   public queueExpressionFrames(frames: ExpressionData[], frameRate: number = 30): void {
@@ -733,6 +790,57 @@ class LAMAvatarController {
   }
 
   /**
+   * Queue expression frames from Live API (real-time sync: performance.now() で再生)
+   * Live API のオーディオは audioIO (Web Audio API) 経由で再生されるため、
+   * ttsPlayer.currentTime は使えない。リアルタイムクロックで同期する。
+   */
+  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30): void {
+    if (!frames || frames.length === 0) return;
+
+    if (this.liveStreamStartTime === null) {
+      // 最初のチャンク: リアルタイムクロック開始
+      this.liveStreamStartTime = performance.now();
+      this.liveStreamConsumedIndex = 0;
+      this.frameBuffer = [];
+      this.frameRate = frameRate;
+      console.log(`[LAM Live] Stream started — first ${frames.length} frames at ${frameRate}fps`);
+    }
+
+    this.frameBuffer = this.frameBuffer.concat(frames);
+    console.log(`[LAM Live] +${frames.length} frames (total: ${this.frameBuffer.length}) at ${frameRate}fps`);
+
+    // 非ゼロフレーム数をログ
+    let nonZeroCount = 0;
+    frames.forEach(f => {
+      const jaw = f['jawOpen'] || 0;
+      const funnel = f['mouthFunnel'] || 0;
+      if (jaw > 0.01 || funnel > 0.01) nonZeroCount++;
+    });
+    if (nonZeroCount > 0) {
+      console.log(`[LAM Live] ${nonZeroCount}/${frames.length} frames have non-zero mouth values`);
+    } else {
+      console.warn(`[LAM Live] ALL ${frames.length} frames have zero mouth values — backend may not be generating expression`);
+    }
+
+    if (this.currentState !== 'Responding') {
+      this.setChatState('Responding');
+    }
+  }
+
+  /**
+   * Stop live stream expression sync
+   */
+  public stopLiveStream(): void {
+    if (this.liveStreamStartTime !== null) {
+      console.log(`[LAM Live] Stream stopped (consumed ${this.liveStreamConsumedIndex}/${this.frameBuffer.length} frames)`);
+    }
+    this.liveStreamStartTime = null;
+    this.liveStreamConsumedIndex = 0;
+    this.frameBuffer = [];
+    this.fadeOutStartTime = performance.now();
+  }
+
+  /**
    * Clear frame buffer (call when starting new speech)
    */
   public clearFrameBuffer(): void {
@@ -742,6 +850,8 @@ class LAMAvatarController {
     this.ttsTransitioning = true; // 新TTS開始まで早期fade-outを抑制
     this.ttsLastCurrentTime = 0;
     this.fadeOutStartTime = null;
+    this.liveStreamStartTime = null;
+    this.liveStreamConsumedIndex = 0;
     console.log('[LAM Avatar] Frame buffer cleared (transitioning)');
   }
 
@@ -751,6 +861,8 @@ class LAMAvatarController {
   public stopTtsSync(): void {
     console.log('[LAM Avatar] stopTtsSync called');
     this.ttsActive = false;
+    this.liveStreamStartTime = null;
+    this.liveStreamConsumedIndex = 0;
     this.resetExpression();
     this.setChatState('Idle');
   }
