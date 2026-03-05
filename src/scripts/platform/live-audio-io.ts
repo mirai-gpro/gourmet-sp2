@@ -242,10 +242,21 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
     return this.isMicActive;
   }
 
-  /** 再生開始からの経過時間（アバター同期用） — ターン内で一貫した時刻を返す */
+  /**
+   * 再生開始からの経過時間（アバター同期用） — ターン内で一貫した時刻を返す
+   * ★ スケジュール済み音声の末端でキャップする
+   * AudioContext.currentTime は音声終了後も進み続けるため、
+   * キャップしないと expression フレームが音声終了後も進行し続ける
+   */
   get playbackCurrentTime(): number {
     if (!this.playbackContext || !this._turnActive) return 0;
-    return this.playbackContext.currentTime - this._playbackStartTime;
+    const elapsed = this.playbackContext.currentTime - this._playbackStartTime;
+    // nextPlayTime > _playbackStartTime: 少なくとも1つの音声チャンクがスケジュール済み
+    if (this.nextPlayTime > this._playbackStartTime) {
+      const scheduledDuration = this.nextPlayTime - this._playbackStartTime;
+      return Math.min(elapsed, scheduledDuration);
+    }
+    return elapsed;
   }
 
   /** ターンリセット（barge-in, ユーザー発話開始時に呼ぶ） */
