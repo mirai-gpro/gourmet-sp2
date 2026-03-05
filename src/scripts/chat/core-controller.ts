@@ -166,8 +166,23 @@ export class CoreController {
     });
 
     // 接続状態
-    this.dialogueManager.on('connection', (connected: boolean) => {
+    this.dialogueManager.on('connection', async (connected: boolean) => {
       console.log(`[Core] Live API connection: ${connected}`);
+      // WebSocket 再接続後にマイクが録音中だった場合、自動再開
+      if (connected && this.isLiveStreaming) {
+        console.log('[Core] WebSocket reconnected — restarting mic stream');
+        try {
+          await this.dialogueManager.startLiveStream();
+          this.els.voiceStatus.innerHTML = this.t('voiceStatusListening');
+          this.els.voiceStatus.className = 'voice-status listening';
+        } catch (error: any) {
+          console.error('[Core] Mic restart after reconnect failed:', error);
+          this.isLiveStreaming = false;
+          this.els.micBtn.classList.remove('recording');
+          this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+          this.els.voiceStatus.className = 'voice-status stopped';
+        }
+      }
     });
   }
 
