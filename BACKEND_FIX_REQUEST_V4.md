@@ -1,6 +1,6 @@
 # バックエンド調査・修正依頼書 v4
 
-**日付**: 2026-03-04
+**日付**: 2026-03-05（問題D 追記）
 **対象**: support-base バックエンド（relay.py / REST TTS / audio2exp）
 **報告者**: gourmet-sp2 フロントエンドチーム
 **ステータス**: 未着手
@@ -9,14 +9,17 @@
 
 ## エグゼクティブサマリ
 
-リップシンク（口の動き）に **3つの未解決問題** が残っている。
+リップシンク（口の動き）に **4つの未解決問題** が残っている。
 いずれもバックエンド側の修正が必要で、フロントエンドでの対処は不可能または不適切。
 
 | # | 問題 | 優先度 | 影響 | 修正箇所 |
 |---|------|--------|------|----------|
+| **D** | Live API expression のチャンク分割が音声とズレる | **P0** | 発話全体で口と音声がズレ続ける | relay.py チャンク戦略 + Gemini プロンプト |
 | **A** | REST TTS の expression が `status=error` | **P0** | 初回挨拶で口が全く動かない | TTS ハンドラ / audio2exp |
 | **B** | Live API expression の初回遅延 ~500–1200ms | **P1** | 発話冒頭の口が動かない | relay.py バッファサイズ |
 | **C** | Live API expression の末尾欠落 1–2秒 | **P1** | 発話末尾の口が動かない | relay.py turn_complete 処理 |
+
+> **問題D は問題B/C の根本原因であり、D を正しく修正すれば B/C も同時に解決する。**
 
 **補足**: 以下の問題は**解決済み**（対応不要）
 
@@ -150,7 +153,203 @@ else:
 
 ---
 
+## 問題D: Live API expression のチャンク分割による音声同期ズレ（P0）
+
+### 現象
+
+音声と口の動きが**冒頭から**ズレている。発話全体を通じて以下が観測される：
+
+1. **音声の間（無音部分）で口が動き続ける** — 単語が終わってポーズがあるのに口パクが止まらない
+2. **音声終了後、約10秒間口が動き続ける** — expression が音声より長い
+3. **ズレは冒頭1〜1.5秒で既に知覚できる** — 累積誤差ではなく固定オフセット
+
+### 実測データ
+
+```
+expression: 2127 frames / 30fps = 70.9秒
+音声:       推定 60秒
+ズレ:       約10秒（expression が音声より長い）
+
+★ 冒頭からズレが見える → 各チャンクの先頭にズレがある
+```
+
+### 根本原因
+
+**audio2exp への 1.5 秒チャンク分割呼び出し**が問題の根源。
+
+REST TTS（正常）と Live API（異常）の比較：
+
+```
+REST（ズレない）:
+  完成した音声全体 → audio2exp 1回 → 音声と expression が 1:1 対応
+
+Live（ズレる）:
+  1.5秒チャンク#1 → audio2exp → 45フレーム（+ 先頭にオフセット?）
+  1.5秒チャンク#2 → audio2exp → 45フレーム（+ 先頭にオフセット?）
+  ...
+  1.5秒チャンク#40 → audio2exp → 45フレーム（+ 先頭にオフセット?）
+  → 40回の独立呼び出し、各回にズレが入る
+```
+
+**なぜ REST で合って Live で合わないか？**
+
+1. REST: audio2exp の呼び出しは**1回**。ウォームアップ/パディング/窓関数の影響は1回だけ
+2. Live: audio2exp の呼び出しは**40〜50回**。各チャンクが独立呼び出しで前後の文脈を持たない
+
+audio2exp が各チャンクの先頭に 200ms の内部バッファ/ウォームアップを持つ場合：
+```
+チャンク1: 200ms のズレ（知覚可能）
+チャンク40: 200ms × 40 = 8秒のズレ（致命的）
+→ 冒頭から知覚でき、かつ最終的に ~10秒のズレになる
+```
+
+### 確認すべき事項
+
+relay.py で各チャンクの入力長と出力フレーム数を比較するログを追加:
+
+```python
+input_duration = len(audio_chunk) / (24000 * 2)  # 秒
+output_frames = len(expression["frames"])
+output_duration = output_frames / 30  # 秒
+logger.info(
+    f"[a2e] chunk#{chunk_idx}: "
+    f"input={input_duration:.3f}s, "
+    f"output={output_frames} frames ({output_duration:.3f}s), "
+    f"diff={output_duration - input_duration:+.3f}s"
+)
+```
+
+**期待される結果**:
+- `diff` が `+0.000s` に近い → audio2exp の出力長は正確（問題は別にある）
+- `diff` が `+0.100s` 以上 → **各チャンクで余分なフレームが出ている（これが原因）**
+
+### 修正方針: チャンク分割をやめる
+
+**問題B（初回遅延）と問題C（末尾欠落）の根本解決にもなる。**
+
+#### 方針1: 初回 0.25 秒 + 残りは turn_complete まで一括（推奨）
+
+```python
+FIRST_CHUNK_SIZE = 24000 * 2 * 0.25  # 0.25秒 = 12000 bytes（初回のみ小さく）
+# 2回目以降: turn_complete まで全バッファを溜めて1回で処理
+
+class ExpressionProcessor:
+    def __init__(self):
+        self._first_chunk_sent = False
+        self._audio_buffer = bytearray()
+        self._chunk_idx = 0
+
+    async def on_audio_chunk(self, audio_bytes: bytes):
+        self._audio_buffer.extend(audio_bytes)
+
+        if not self._first_chunk_sent:
+            # 初回: 0.25秒で即座にリップシンク開始
+            if len(self._audio_buffer) >= FIRST_CHUNK_SIZE:
+                chunk = bytes(self._audio_buffer)
+                self._audio_buffer = bytearray()
+                self._first_chunk_sent = True
+                self._chunk_idx += 1
+                asyncio.create_task(
+                    self._send_expression_chunk(chunk, is_final=False)
+                )
+        # 2回目以降: バッファを溜め続ける（チャンク分割しない）
+
+    async def on_turn_complete(self):
+        # 残り全部を1回で処理（REST と同じ精度）
+        if self._audio_buffer:
+            chunk = bytes(self._audio_buffer)
+            self._audio_buffer = bytearray()
+            self._chunk_idx += 1
+            await self._send_expression_chunk(chunk, is_final=True)
+
+        self._first_chunk_sent = False
+        self._chunk_idx = 0
+```
+
+#### 方針2: Gemini プロンプトで応答長を制限（併用推奨）
+
+先行プロジェクト（リップシンク成功済み）では、LLM の応答を**15文字以内**に制限したところ
+リップシンクが正確に動作した。これは応答が短い = audio2exp の呼び出しが 1〜2 回で済むため。
+
+```python
+# Gemini Live API のシステムプロンプトに追加
+SYSTEM_PROMPT += """
+## 応答の長さ制限
+- 1回の応答は原則 **30文字以内**（日本語）
+- 長い説明が必要な場合は複数ターンに分ける
+- 短い応答の方がユーザーとの対話がテンポよく進む
+"""
+```
+
+### 方針1+2 の組み合わせ効果
+
+| シナリオ | audio2exp 呼び出し回数 | ズレ |
+|----------|----------------------|------|
+| 現在（1.5秒チャンク × 40回） | 40回 | 〜10秒 |
+| 方針1のみ（初回0.25秒 + 残り一括） | 2回 | ≒ 0（REST同等） |
+| 方針2のみ（応答30文字 ≈ 2-4秒） | 2〜3回 | 〜0.5秒 |
+| **方針1+2 併用** | **1〜2回** | **≒ 0** |
+
+### 方針1+2 のリスクと対策
+
+| リスク | 発生条件 | 対策 |
+|--------|---------|------|
+| 方針1で2回目チャンクが大きすぎる | 応答が長い（30秒以上） | 方針2でプロンプト制限 |
+| 方針2でユーザー体験が損なわれる | 短すぎて不自然な応答 | 30文字（15文字より緩い）で調整 |
+| a2e が長い音声を処理できない | 入力上限がある場合 | 10秒上限のフォールバック分割 |
+
+```python
+# フォールバック: 方針1 で残りバッファが 10秒を超えた場合のみ分割
+MAX_BUFFER_SIZE = 24000 * 2 * 10  # 10秒 = 480000 bytes
+
+async def on_audio_chunk(self, audio_bytes: bytes):
+    self._audio_buffer.extend(audio_bytes)
+
+    if not self._first_chunk_sent:
+        if len(self._audio_buffer) >= FIRST_CHUNK_SIZE:
+            # 初回 0.25秒
+            chunk = bytes(self._audio_buffer)
+            self._audio_buffer = bytearray()
+            self._first_chunk_sent = True
+            asyncio.create_task(self._send_expression_chunk(chunk, is_final=False))
+    elif len(self._audio_buffer) >= MAX_BUFFER_SIZE:
+        # 安全弁: 10秒を超えたら分割（通常はプロンプト制限で到達しない）
+        chunk = bytes(self._audio_buffer)
+        self._audio_buffer = bytearray()
+        asyncio.create_task(self._send_expression_chunk(chunk, is_final=False))
+```
+
+### 検証方法
+
+```
+# 改善前
+[a2e] chunk#1: input=1.500s, output=46 frames (1.533s), diff=+0.033s
+[a2e] chunk#2: input=1.500s, output=46 frames (1.533s), diff=+0.033s
+... (×40回)
+→ 累積 +1.3s ～ +10s のズレ
+
+# 改善後（方針1+2 併用）
+[a2e] chunk#1: input=0.250s, output=8 frames (0.267s), diff=+0.017s   ← 初回 0.25秒
+[a2e] chunk#2: input=2.500s, output=75 frames (2.500s), diff=+0.000s  ← 残り一括
+→ ズレ ≒ 0 (REST 同等)
+```
+
+ブラウザコンソールで確認:
+```
+# 改善前
+[LAM Live-Sync] Frame 30/2127: elapsed=1010ms   ← 2127フレーム（70.9秒分）
+
+# 改善後
+[LAM Live-Sync] Frame 30/83: elapsed=1010ms     ← 83フレーム（2.8秒分）
+# ↑ 応答が短い + 分割なし = フレーム総数が音声秒数に一致
+```
+
+---
+
 ## 問題B: Live API expression の初回遅延（P1）
+
+> **注: 問題D の方針1（初回 0.25 秒バッファ）を実装すれば、この問題は自動的に解決する。**
+> 問題D の修正が先に入る場合、本セクションの修正は不要。
 
 ### 現象
 
@@ -240,6 +439,9 @@ asyncio.create_task(self._send_expression_chunk(chunk))
 ---
 
 ## 問題C: Live API expression の末尾欠落（P1）
+
+> **注: 問題D の方針1（turn_complete で残りバッファ一括送信）を実装すれば、この問題は自動的に解決する。**
+> 問題D の修正が先に入る場合、本セクションの修正は不要。
 
 ### 現象
 
@@ -449,6 +651,16 @@ for frame in expression["frames"]:
 
 ## 完了チェックリスト
 
+### P0: 問題D — Live API チャンク分割による音声同期ズレ
+
+- [ ] relay.py でチャンク入力長 vs 出力フレーム数の比較ログを追加し、ズレ量を確認
+- [ ] 方針1: 初回 0.25 秒チャンク + 残りは turn_complete まで一括に変更
+- [ ] 方針2: Gemini システムプロンプトに 30 文字以内の応答制限を追加
+- [ ] フォールバック: 10 秒超の場合のみ分割するガードを追加
+- [ ] ブラウザで確認: 音声再生と口の動きが冒頭からズレないこと
+- [ ] ブラウザで確認: 音声終了後に口が動き続けないこと（±0.5 秒以内に停止）
+- [ ] `a2e` 呼び出し回数が 1〜2 回であること（40 回ではない）
+
 ### P0: 問題A — REST TTS expression
 
 - [ ] Cloud Run ログで `expression_status=error` の原因を特定
@@ -456,15 +668,15 @@ for frame in expression["frames"]:
 - [ ] curl テストで `expression` フィールドが返る
 - [ ] expression の `frames` が非ゼロ値を含む（maxVal > 0.01）
 
-### P1: 問題B — Live API 初回遅延
+### P1: 問題B — Live API 初回遅延（問題D で自動解決）
 
-- [ ] relay.py のバッファサイズを **1.5秒 → 0.75秒** に縮小
+- [ ] ~~relay.py のバッファサイズを **1.5秒 → 0.75秒** に縮小~~ → 問題D の方針1 で解決
 - [ ] フロントエンドの初回遅延が **250ms 以下** に改善
 - [ ] Turn 2 以降で遅延が悪化しないことを確認
 
-### P1: 問題C — Live API 末尾欠落
+### P1: 問題C — Live API 末尾欠落（問題D で自動解決）
 
-- [ ] `turn_complete` 時に残りバッファを `is_final=True` で audio2exp に送信
+- [ ] ~~`turn_complete` 時に残りバッファを `is_final=True` で audio2exp に送信~~ → 問題D の方針1 で解決
 - [ ] `turn_complete` 後に偽のゼロチャンクを送信しないことを確認
 - [ ] expression の総フレーム数 / 30fps ≒ 音声の総秒数（誤差 ±0.5秒）
 
@@ -494,6 +706,18 @@ if 'expression' in d and d['expression']:
 else:
     print(f'FAIL: expression missing or empty (status={d.get(\"expression_status\",\"N/A\")})')
 "
+
+# === 問題D: Live API チャンク分割 — サーバーログで確認 ===
+# relay.py のログで以下を確認:
+#
+# [a2e] chunk#1: input=0.250s, output=8 frames (0.267s), diff=+0.017s
+# [a2e] chunk#2: input=2.500s, output=75 frames (2.500s), diff=+0.000s
+#   → チャンク数が 1〜2 回であること（40回ではない）
+#   → diff が ±0.1s 以内であること
+#
+# ブラウザコンソールで以下を確認:
+# [LAM Live-Sync] Frame 30/83: elapsed=1010ms
+#   → フレーム総数 / 30fps ≒ 音声の総秒数（±0.5秒以内）
 
 # === 問題B/C: Live API — ブラウザコンソールで確認 ===
 # 以下のログが出力されることを確認:
