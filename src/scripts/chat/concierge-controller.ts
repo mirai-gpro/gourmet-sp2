@@ -202,11 +202,12 @@ export class ConciergeController extends CoreController {
       return frame;
     });
 
-    // ★ 音声再生開始時刻（wall clock）で expression を同期
-    // LiveAudioIO が音声を遅延再生するため、その開始時刻に合わせて
-    // expression フレーム 0 を開始する。音声と口の動きが同時に始まる。
-    const audioStartWallTime: number = (data as any)._audioStartWallTime || 0;
-    lamController.queueLiveExpressionFrames(frames, frameRate, audioStartWallTime, isFinal, chunkIndex);
+    // ★ Live API はリアルタイムクロック同期を使用（ttsPlayerは不使用）
+    // _audioPlaybackTime: AudioContext の実再生経過時間（秒）
+    // performance.now() ではなく AudioContext.currentTime ベースなので
+    // デコード・スケジュール遅延を含む正確な音声再生位置を示す
+    const audioPlaybackTimeSec: number = (data as any)._audioPlaybackTime || 0;
+    lamController.queueLiveExpressionFrames(frames, frameRate, audioPlaybackTimeSec, isFinal, chunkIndex);
   }
 
   // ========================================

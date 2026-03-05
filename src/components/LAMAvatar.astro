@@ -613,16 +613,6 @@ class LAMAvatarController {
       const elapsedMs = performance.now() - this.liveStreamStartTime;
       const frameIndex = Math.floor((elapsedMs / 1000) * this.frameRate);
 
-      // ★ 音声再生前（frameIndex < 0）: 待機中。
-      // LiveAudioIO が音声を遅延再生するため、expression 到着直後は
-      // まだ音声が始まっていない。ニュートラル表情で待機する。
-      if (frameIndex < 0) {
-        if (this.currentState !== 'Responding') {
-          this.setChatState('Responding');
-        }
-        return this.safeReturnExpression();
-      }
-
       if (frameIndex >= 0 && frameIndex < this.frameBuffer.length) {
         this.expressionData = {};
         const frame = this.frameBuffer[frameIndex];
@@ -824,23 +814,18 @@ class LAMAvatarController {
    * audioIO.playbackCurrentTime から取得。AudioContext のハードウェアクロックに
    * 同期するため、performance.now() より正確な音声再生位置を示す。
    */
-  /**
-   * audioStartWallTime: LiveAudioIO の音声再生開始時刻（performance.now()）
-   * 音声は audio2exp 処理待ちのため遅延再生される。expression と音声の
-   * 両方がこの時刻を基準に同期する。
-   */
-  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioStartWallTime?: number | null, isFinal?: boolean, chunkIndex?: number): void {
+  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioPlaybackTimeSec?: number | null, isFinal?: boolean, chunkIndex?: number): void {
     if (!frames || frames.length === 0) return;
 
     if (this.liveStreamStartTime === null) {
-      // ★ 音声再生開始時刻を基準にする
-      // LiveAudioIO が音声を _playbackDelaySec 遅延して再生するため、
-      // その遅延再生開始時刻と expression フレーム 0 を合わせる。
-      // これにより音声再生と expression が完全に同期する。
-      if (audioStartWallTime != null && audioStartWallTime > 0) {
-        this.liveStreamStartTime = audioStartWallTime;
-        const waitMs = audioStartWallTime - performance.now();
-        console.log(`[LAM Live] Stream started — synced to audio playback start (in ${waitMs.toFixed(0)}ms), ${frames.length} frames at ${frameRate}fps`);
+      // AudioContext の再生経過時間が提供されている場合、
+      // 既に再生された分のフレームをスキップするためのオフセットを計算
+      if (audioPlaybackTimeSec != null && audioPlaybackTimeSec > 0) {
+        // performance.now() からオフセットを引いて、音声開始時点の仮想タイムスタンプを算出
+        const audioElapsedMs = audioPlaybackTimeSec * 1000;
+        this.liveStreamStartTime = performance.now() - audioElapsedMs;
+        const skipFrames = Math.floor(audioPlaybackTimeSec * frameRate);
+        console.log(`[LAM Live] Stream started — synced to AudioContext (${audioElapsedMs.toFixed(0)}ms played, skip ${skipFrames} frames), ${frames.length} frames at ${frameRate}fps`);
       } else {
         this.liveStreamStartTime = performance.now();
         console.log(`[LAM Live] Stream started — first ${frames.length} frames at ${frameRate}fps`);
