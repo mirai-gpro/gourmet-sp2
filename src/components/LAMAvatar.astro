@@ -810,20 +810,22 @@ class LAMAvatarController {
    * ttsPlayer.currentTime は使えない。リアルタイムクロックで同期する。
    */
   /**
-   * audioStartTime: performance.now() timestamp when first audio chunk was received.
-   * If provided, expression playback syncs to audio start (not expression arrival).
-   * This handles the case where backend sends expression after audio finishes.
+   * audioPlaybackTimeSec: AudioContext.currentTime ベースの音声再生経過時間（秒）
+   * audioIO.playbackCurrentTime から取得。AudioContext のハードウェアクロックに
+   * 同期するため、performance.now() より正確な音声再生位置を示す。
    */
-  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioStartTime?: number | null, isFinal?: boolean, chunkIndex?: number): void {
+  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioPlaybackTimeSec?: number | null, isFinal?: boolean, chunkIndex?: number): void {
     if (!frames || frames.length === 0) return;
 
     if (this.liveStreamStartTime === null) {
-      // 音声開始時刻が提供されている場合はそれを基準にする
-      // （バックエンドが turn_complete 後に一括送信する場合の対策）
-      if (audioStartTime != null && audioStartTime > 0) {
-        this.liveStreamStartTime = audioStartTime;
-        const delay = performance.now() - audioStartTime;
-        console.log(`[LAM Live] Stream started — synced to audio start (${delay.toFixed(0)}ms ago), ${frames.length} frames at ${frameRate}fps`);
+      // AudioContext の再生経過時間が提供されている場合、
+      // 既に再生された分のフレームをスキップするためのオフセットを計算
+      if (audioPlaybackTimeSec != null && audioPlaybackTimeSec > 0) {
+        // performance.now() からオフセットを引いて、音声開始時点の仮想タイムスタンプを算出
+        const audioElapsedMs = audioPlaybackTimeSec * 1000;
+        this.liveStreamStartTime = performance.now() - audioElapsedMs;
+        const skipFrames = Math.floor(audioPlaybackTimeSec * frameRate);
+        console.log(`[LAM Live] Stream started — synced to AudioContext (${audioElapsedMs.toFixed(0)}ms played, skip ${skipFrames} frames), ${frames.length} frames at ${frameRate}fps`);
       } else {
         this.liveStreamStartTime = performance.now();
         console.log(`[LAM Live] Stream started — first ${frames.length} frames at ${frameRate}fps`);

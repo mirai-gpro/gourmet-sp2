@@ -44,6 +44,7 @@ export class LiveAudioIO {
 
   // 再生中の currentTime を外部から参照可能にする（アバター同期用）
   private _playbackStartTime = 0;
+  private _turnActive = false;  // ターン内で playbackStartTime を1回だけ設定するフラグ
 
   private isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
@@ -202,7 +203,7 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
   stopPlayback(): void {
     this.playbackQueue = [];
     this.isPlaying = false;
-    this.nextPlayTime = 0;
+    this.resetTurn();
     console.log('[LiveAudioIO] Playback stopped (barge-in)');
   }
 
@@ -219,10 +220,17 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
     return this.isMicActive;
   }
 
-  /** 再生開始からの経過時間（アバター同期用） */
+  /** 再生開始からの経過時間（アバター同期用） — ターン内で一貫した時刻を返す */
   get playbackCurrentTime(): number {
-    if (!this.playbackContext) return 0;
+    if (!this.playbackContext || !this._turnActive) return 0;
     return this.playbackContext.currentTime - this._playbackStartTime;
+  }
+
+  /** ターンリセット（barge-in, ユーザー発話開始時に呼ぶ） */
+  resetTurn(): void {
+    this._turnActive = false;
+    this._playbackStartTime = 0;
+    this.nextPlayTime = 0;
   }
 
   private async processPlaybackQueue(): Promise<void> {
@@ -237,7 +245,12 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
     }
 
     this.isPlaying = true;
-    this._playbackStartTime = this.playbackContext.currentTime;
+    // ターン内で最初の processPlaybackQueue 呼び出し時のみ _playbackStartTime を設定
+    // 2回目以降のチャンク処理では上書きしない（累積再生時間を正しく計測するため）
+    if (!this._turnActive) {
+      this._playbackStartTime = this.playbackContext.currentTime;
+      this._turnActive = true;
+    }
 
     while (this.playbackQueue.length > 0) {
       const pcmBytes = this.playbackQueue.shift();
