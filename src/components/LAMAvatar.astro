@@ -675,6 +675,29 @@ class LAMAvatarController {
       }
     }
 
+    // Live stream ended → fade-out to Idle
+    // liveStreamStartTime が null（ストリーム終了済み）かつ fadeOutStartTime が設定されている場合
+    if (this.fadeOutStartTime !== null && this.liveStreamStartTime === null && this.currentState === 'Responding') {
+      const fadeOutDurationMs = (this.FADE_IN_FRAMES / this.frameRate) * 1000;
+      const elapsed = performance.now() - this.fadeOutStartTime;
+      const fadeOutAlpha = Math.max(0, 1.0 - elapsed / fadeOutDurationMs);
+
+      if (fadeOutAlpha > 0) {
+        Object.keys(this.expressionData).forEach((name: string) => {
+          this.expressionData[name] = (this.expressionData[name] || 0) * fadeOutAlpha;
+        });
+        return this.safeReturnExpression();
+      }
+
+      // Fade-out complete → Idle復帰
+      this.fadeOutStartTime = null;
+      this.ttsActive = false;  // Live モードで偽 play イベントにより true になった状態をクリア
+      console.log('[LAM Live] Fade-out complete, returning to Idle');
+      this.resetExpression();
+      this.setChatState('Idle');
+      return this.safeReturnExpression();
+    }
+
     // TTS sync mode: index frameBuffer by ttsPlayer.currentTime
     if (this.syncMode === 'external' && this.externalTtsPlayer && this.frameBuffer.length > 0) {
       const currentTimeMs = this.externalTtsPlayer.currentTime * 1000;
