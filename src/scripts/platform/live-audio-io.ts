@@ -157,6 +157,19 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
       source.connect(this.workletNode);
 
+      // 再生用 AudioContext も同時に生成（ユーザーインタラクション内で生成する必要があるため）
+      // これにより queuePlayback() 時点で playbackContext が常に存在し、
+      // _playbackStartTime を同期的に設定できる（expression 同期の競合状態を防止）
+      if (!this.playbackContext) {
+        // @ts-ignore
+        const PlaybackCtx = window.AudioContext || window.webkitAudioContext;
+        this.playbackContext = new PlaybackCtx({ sampleRate: this.receiveSampleRate });
+        if (this.playbackContext.state === 'suspended') {
+          await this.playbackContext.resume();
+        }
+        console.log('[LiveAudioIO] Playback AudioContext created in user interaction');
+      }
+
       this.isMicActive = true;
       console.log('[LiveAudioIO] Mic started (48kHz → 16kHz)');
     } catch (e) {
@@ -191,6 +204,15 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
   queuePlayback(base64Pcm: string): void {
     const pcmBytes = this.base64ToArrayBuffer(base64Pcm);
     this.playbackQueue.push(pcmBytes);
+
+    // ターン内最初の音声チャンク → _playbackStartTime を同期的に設定
+    // playbackContext は startMic() で生成済みなので必ず存在する
+    // expression ハンドラが playbackCurrentTime を読む時点で正確な値が返る
+    if (!this._turnActive && this.playbackContext) {
+      this._playbackStartTime = this.playbackContext.currentTime;
+      this._turnActive = true;
+      console.log(`[LiveAudioIO] Turn started: playbackStartTime=${this._playbackStartTime.toFixed(3)}s`);
+    }
 
     if (!this.isPlaying) {
       this.processPlaybackQueue();
@@ -245,12 +267,6 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
     }
 
     this.isPlaying = true;
-    // ターン内で最初の processPlaybackQueue 呼び出し時のみ _playbackStartTime を設定
-    // 2回目以降のチャンク処理では上書きしない（累積再生時間を正しく計測するため）
-    if (!this._turnActive) {
-      this._playbackStartTime = this.playbackContext.currentTime;
-      this._turnActive = true;
-    }
 
     while (this.playbackQueue.length > 0) {
       const pcmBytes = this.playbackQueue.shift();
