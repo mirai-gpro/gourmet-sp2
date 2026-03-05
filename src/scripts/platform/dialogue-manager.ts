@@ -348,6 +348,14 @@ export class DialogueManager {
       wsClient: this.wsClient,
       sendSampleRate: 16000,
       receiveSampleRate: 24000,
+      onAmplitudeExpression: (data) => {
+        // バックエンドから expression が来ない場合のフォールバック:
+        // PCM 音声振幅から口パク expression を自動生成
+        if (this.audioIO) {
+          (data as any)._audioPlaybackTime = this.audioIO.playbackCurrentTime;
+        }
+        this.emit('expression', data);
+      },
     });
 
     await this.audioIO.startMic();

@@ -22,6 +22,7 @@ export interface LiveAudioIOOptions {
   sendSampleRate?: number;
   receiveSampleRate?: number;
   chunkDurationMs?: number;
+  onAmplitudeExpression?: (data: { names: string[]; frames: number[][]; frame_rate: number }) => void;
 }
 
 export class LiveAudioIO {
@@ -46,6 +47,9 @@ export class LiveAudioIO {
   private _playbackStartTime = 0;
   private _turnActive = false;  // ターン内で playbackStartTime を1回だけ設定するフラグ
 
+  // 音声振幅→口パク生成コールバック
+  private onAmplitudeExpression: ((data: { names: string[]; frames: number[][]; frame_rate: number }) => void) | null = null;
+
   private isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
   constructor(options: LiveAudioIOOptions) {
@@ -53,6 +57,7 @@ export class LiveAudioIO {
     this.sendSampleRate = options.sendSampleRate ?? 16000;
     this.receiveSampleRate = options.receiveSampleRate ?? 24000;
     this.chunkDurationMs = options.chunkDurationMs ?? 100;
+    this.onAmplitudeExpression = options.onAmplitudeExpression ?? null;
   }
 
   /**
@@ -187,13 +192,80 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
   /**
    * PCM 24kHz 音声をキューに追加して再生
    * relay.py から受信した base64 PCM をデコードして再生する
+   * ★ バックエンドから expression が来ない場合、音声振幅から口パクを自動生成する
    */
   queuePlayback(base64Pcm: string): void {
     const pcmBytes = this.base64ToArrayBuffer(base64Pcm);
     this.playbackQueue.push(pcmBytes);
 
+    // 音声振幅から口パク expression を生成
+    if (this.onAmplitudeExpression) {
+      this.generateAmplitudeExpression(pcmBytes);
+    }
+
     if (!this.isPlaying) {
       this.processPlaybackQueue();
+    }
+  }
+
+  /**
+   * PCM データの振幅を解析して口パク expression フレームを生成
+   * 30fps でフレームを生成し、jawOpen / mouthFunnel / mouthLowerDownLeft を振幅に応じて設定
+   */
+  private generateAmplitudeExpression(pcmBytes: ArrayBuffer): void {
+    const int16 = new Int16Array(pcmBytes);
+    const frameRate = 30;
+    const samplesPerFrame = Math.floor(this.receiveSampleRate / frameRate);
+
+    const blendshapeNames = [
+      'jawOpen', 'mouthFunnel', 'mouthLowerDownLeft', 'mouthLowerDownRight',
+      'mouthPucker', 'mouthStretchLeft', 'mouthStretchRight',
+      'mouthSmileLeft', 'mouthSmileRight', 'mouthClose'
+    ];
+
+    const frames: number[][] = [];
+
+    for (let offset = 0; offset < int16.length; offset += samplesPerFrame) {
+      const end = Math.min(offset + samplesPerFrame, int16.length);
+
+      // RMS 振幅を計算
+      let sumSq = 0;
+      for (let i = offset; i < end; i++) {
+        const v = int16[i] / 32768;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / (end - offset));
+
+      // RMS を 0-1 の口の開き度合いに変換
+      // 一般的な音声の RMS は 0.01〜0.3 程度
+      const normalized = Math.min(1.0, rms / 0.15);
+      // より自然な動きのためにイージング適用
+      const jawOpen = Math.pow(normalized, 0.6) * 0.8;
+      const mouthFunnel = jawOpen * 0.4;
+      const mouthLower = jawOpen * 0.5;
+
+      // blendshapeNames の順序に対応する値を設定
+      const values = new Array(blendshapeNames.length).fill(0);
+      values[0] = jawOpen;                        // jawOpen
+      values[1] = mouthFunnel;                    // mouthFunnel
+      values[2] = mouthLower;                     // mouthLowerDownLeft
+      values[3] = mouthLower;                     // mouthLowerDownRight
+      values[4] = jawOpen * 0.2;                  // mouthPucker
+      values[5] = jawOpen * 0.15;                 // mouthStretchLeft
+      values[6] = jawOpen * 0.15;                 // mouthStretchRight
+      values[7] = Math.max(0, 0.1 - jawOpen * 0.1); // mouthSmileLeft (微笑み: 口が開くと減少)
+      values[8] = Math.max(0, 0.1 - jawOpen * 0.1); // mouthSmileRight
+      values[9] = 0;                              // mouthClose
+
+      frames.push(values);
+    }
+
+    if (frames.length > 0 && this.onAmplitudeExpression) {
+      this.onAmplitudeExpression({
+        names: blendshapeNames,
+        frames,
+        frame_rate: frameRate,
+      });
     }
   }
 
