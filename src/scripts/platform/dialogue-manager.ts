@@ -287,11 +287,13 @@ export class DialogueManager {
     });
 
     this.wsClient.on('expression', (msg: LiveWSMessage) => {
-      // AudioContext の実再生時間を付与して expression を送出
-      // audioIO.playbackCurrentTime は AudioContext.currentTime ベースで
-      // 音声チャンク受信→デコード→スケジュール の遅延を含む正確な値
+      // ★ 音声の実再生開始時刻（wall clock）を expression に付与
+      // LiveAudioIO は最初の音声チャンクを _playbackDelaySec 遅延して再生する。
+      // playbackStartWallTime はその遅延後の再生開始時刻（performance.now()ベース）。
+      // LAMAvatar はこの時刻を基準に expression フレーム 0 を開始する。
       if (msg.data && this.audioIO) {
-        msg.data._audioPlaybackTime = this.audioIO.playbackCurrentTime;
+        // 再生開始時刻 = ターン開始壁時計 + 遅延バッファ時間
+        msg.data._audioStartWallTime = this.audioIO.playbackStartWallTime;
       }
       this.emit('expression', msg.data);
     });

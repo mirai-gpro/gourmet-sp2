@@ -46,6 +46,12 @@ export class LiveAudioIO {
   private _playbackStartTime = 0;
   private _turnActive = false;  // ターン内で playbackStartTime を1回だけ設定するフラグ
 
+  // ★ リップシンク同期: 音声再生を遅延して expression 到着を待つ
+  // audio2exp パイプラインの処理遅延（~500ms）を吸収するため、
+  // ターンの最初の音声チャンクを遅延再生する。expression データが
+  // 音声再生開始前に到着するため、リップシンクが正確に同期する。
+  private _playbackDelaySec = 0.5;  // 500ms pre-buffer
+
   private isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
   constructor(options: LiveAudioIOOptions) {
@@ -223,13 +229,30 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
   /** 再生開始からの経過時間（アバター同期用） — ターン内で一貫した時刻を返す */
   get playbackCurrentTime(): number {
     if (!this.playbackContext || !this._turnActive) return 0;
-    return this.playbackContext.currentTime - this._playbackStartTime;
+    // playbackDelay を差し引いた実効再生時間を返す
+    // 遅延中（< 0）の場合は 0 を返す
+    const raw = this.playbackContext.currentTime - this._playbackStartTime;
+    return Math.max(0, raw - this._playbackDelaySec);
   }
+
+  /**
+   * 音声の実際の再生開始時刻（expression 同期の基準点）
+   * performance.now() ベースの wall clock。
+   * _playbackDelaySec を加味した「実際に音声が鳴り始める時刻」を返す。
+   */
+  get playbackStartWallTime(): number {
+    if (!this._turnActive) return 0;
+    // _playbackStartWallTime はターン開始時の performance.now()
+    // + 遅延バッファ = 実際の音声再生開始時刻
+    return this._playbackStartWallTime + this._playbackDelaySec * 1000;
+  }
+  private _playbackStartWallTime = 0;
 
   /** ターンリセット（barge-in, ユーザー発話開始時に呼ぶ） */
   resetTurn(): void {
     this._turnActive = false;
     this._playbackStartTime = 0;
+    this._playbackStartWallTime = 0;
     this.nextPlayTime = 0;
   }
 
@@ -249,7 +272,13 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
     // 2回目以降のチャンク処理では上書きしない（累積再生時間を正しく計測するため）
     if (!this._turnActive) {
       this._playbackStartTime = this.playbackContext.currentTime;
+      this._playbackStartWallTime = performance.now();
       this._turnActive = true;
+      // ★ リップシンク同期: 最初のチャンクは _playbackDelaySec 後に再生開始
+      // この間に audio2exp の処理結果（expression）がフロントエンドに到着するため、
+      // 音声再生開始と expression 再生開始がほぼ同時になり、リップシンクが同期する
+      this.nextPlayTime = this.playbackContext.currentTime + this._playbackDelaySec;
+      console.log(`[LiveAudioIO] Turn started — audio delayed by ${(this._playbackDelaySec * 1000).toFixed(0)}ms for lip sync`);
     }
 
     while (this.playbackQueue.length > 0) {
