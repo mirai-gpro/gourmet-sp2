@@ -177,6 +177,7 @@ class LAMAvatarController {
   // Live API real-time sync (ttsPlayerを使わないケース)
   private liveStreamStartTime: number | null = null;
   private liveStreamConsumedIndex: number = 0;
+  private liveStreamIsFinal: boolean = false;
 
   // Frame buffer for expression
   private frameBuffer: ExpressionData[] = [];
@@ -640,25 +641,37 @@ class LAMAvatarController {
         return this.safeReturnExpression();
 
       } else if (frameIndex >= this.frameBuffer.length) {
-        // バッファ末端到達 — 新しいチャンクが来るか待つ（最大2秒）
-        const waitMs = elapsedMs - (this.frameBuffer.length / this.frameRate * 1000);
-        if (waitMs < 2000) {
-          // 最後のフレームをホールド
-          const lastFrame = this.frameBuffer[this.frameBuffer.length - 1];
-          if (lastFrame) {
-            this.expressionData = {};
-            Object.keys(lastFrame).forEach((name: string) => {
-              this.expressionData[name] = lastFrame[name];
-            });
+        // バッファ末端到達
+        if (this.liveStreamIsFinal) {
+          // ★ is_final 受信済み → 全フレーム再生完了、即座にストリーム終了
+          console.log(`[LAM Live] Stream ended (all ${this.frameBuffer.length} frames played, is_final=true)`);
+          this.liveStreamStartTime = null;
+          this.liveStreamConsumedIndex = 0;
+          this.liveStreamIsFinal = false;
+          this.frameBuffer = [];
+          this.fadeOutStartTime = performance.now();
+        } else {
+          // is_final 未受信 → 新しいチャンクが来るか待つ（最大2秒）
+          const waitMs = elapsedMs - (this.frameBuffer.length / this.frameRate * 1000);
+          if (waitMs < 2000) {
+            // 最後のフレームをホールド
+            const lastFrame = this.frameBuffer[this.frameBuffer.length - 1];
+            if (lastFrame) {
+              this.expressionData = {};
+              Object.keys(lastFrame).forEach((name: string) => {
+                this.expressionData[name] = lastFrame[name];
+              });
+            }
+            return this.safeReturnExpression();
           }
-          return this.safeReturnExpression();
+          // 2秒以上新チャンクなし → ストリーム終了（フォールバック）
+          console.log(`[LAM Live] Stream ended (no new chunks for ${waitMs.toFixed(0)}ms)`);
+          this.liveStreamStartTime = null;
+          this.liveStreamConsumedIndex = 0;
+          this.liveStreamIsFinal = false;
+          this.frameBuffer = [];
+          this.fadeOutStartTime = performance.now();
         }
-        // 2秒以上新チャンクなし → ストリーム終了
-        console.log(`[LAM Live] Stream ended (no new chunks for ${waitMs.toFixed(0)}ms)`);
-        this.liveStreamStartTime = null;
-        this.liveStreamConsumedIndex = 0;
-        this.frameBuffer = [];  // ★ バッファクリア（TTS-Sync モードでのリプレイ防止）
-        this.fadeOutStartTime = performance.now();
       }
     }
 
@@ -801,7 +814,7 @@ class LAMAvatarController {
    * If provided, expression playback syncs to audio start (not expression arrival).
    * This handles the case where backend sends expression after audio finishes.
    */
-  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioStartTime?: number | null): void {
+  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioStartTime?: number | null, isFinal?: boolean, chunkIndex?: number): void {
     if (!frames || frames.length === 0) return;
 
     if (this.liveStreamStartTime === null) {
@@ -818,10 +831,17 @@ class LAMAvatarController {
       this.liveStreamConsumedIndex = 0;
       this.frameBuffer = [];
       this.frameRate = frameRate;
+      this.liveStreamIsFinal = false;
     }
 
     this.frameBuffer = this.frameBuffer.concat(frames);
-    console.log(`[LAM Live] +${frames.length} frames (total: ${this.frameBuffer.length}) at ${frameRate}fps`);
+
+    if (isFinal) {
+      this.liveStreamIsFinal = true;
+      console.log(`[LAM Live] +${frames.length} frames (total: ${this.frameBuffer.length}) at ${frameRate}fps [FINAL chunk#${chunkIndex ?? '?'}]`);
+    } else {
+      console.log(`[LAM Live] +${frames.length} frames (total: ${this.frameBuffer.length}) at ${frameRate}fps [chunk#${chunkIndex ?? '?'}]`);
+    }
 
     // 非ゼロフレーム数をログ
     let nonZeroCount = 0;
@@ -850,6 +870,7 @@ class LAMAvatarController {
     }
     this.liveStreamStartTime = null;
     this.liveStreamConsumedIndex = 0;
+    this.liveStreamIsFinal = false;
     this.frameBuffer = [];
     this.fadeOutStartTime = performance.now();
   }
