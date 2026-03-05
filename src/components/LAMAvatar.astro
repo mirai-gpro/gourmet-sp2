@@ -177,6 +177,10 @@ class LAMAvatarController {
   // Live API real-time sync (ttsPlayerを使わないケース)
   private liveStreamStartTime: number | null = null;
   private liveStreamConsumedIndex: number = 0;
+  // AudioContext ベースのフレーム同期（performance.now() の代わり）
+  private liveAudioTimeGetter: (() => number) | null = null;
+  private _lastLiveFrameIndex: number = -1;
+  private _liveStallStart: number | null = null;
   private liveStreamIsFinal: boolean = false;
 
   // Frame buffer for expression
@@ -266,6 +270,15 @@ class LAMAvatarController {
 
     this.externalTtsLinked = true;
     console.log('[LAM Avatar] External TTS player linked');
+  }
+
+  /**
+   * Live API 音声同期: AudioContext.currentTime ベースの再生時間取得関数を設定
+   * これにより performance.now() ではなく実際の音声再生位置でフレームを進行させる
+   */
+  public setLiveAudioTimeGetter(getter: () => number): void {
+    this.liveAudioTimeGetter = getter;
+    console.log('[LAM Avatar] Live audio time getter set');
   }
 
   public setSyncMode(mode: 'bundled' | 'external'): void {
@@ -608,12 +621,44 @@ class LAMAvatarController {
       return this.safeReturnExpression();
     }
 
-    // Live API real-time sync: performance.now() でフレーム進行
+    // Live API sync: AudioContext ベースの音声再生時間でフレーム進行
+    // ★ performance.now() ではなく実際の音声再生位置を使う
+    // AudioContext.currentTime はハードウェアクロック同期で、
+    // スケジュール済み音声の末端でキャップされるため
+    // 音声終了後にフレームが進行し続ける問題を防ぐ
     if (this.liveStreamStartTime !== null && this.frameBuffer.length > 0) {
-      const elapsedMs = performance.now() - this.liveStreamStartTime;
+      let elapsedMs: number;
+      if (this.liveAudioTimeGetter) {
+        // AudioContext ベース: 実際の音声再生位置に同期
+        elapsedMs = this.liveAudioTimeGetter() * 1000;
+      } else {
+        // フォールバック: wall clock
+        elapsedMs = performance.now() - this.liveStreamStartTime;
+      }
       const frameIndex = Math.floor((elapsedMs / 1000) * this.frameRate);
 
-      if (frameIndex >= 0 && frameIndex < this.frameBuffer.length) {
+      // ★ 音声時間停止検出: playbackCurrentTime がキャップされると frameIndex が固定される
+      // 1.5秒以上固定 → 音声再生完了とみなしストリーム終了
+      if (this.liveAudioTimeGetter && frameIndex === this._lastLiveFrameIndex) {
+        if (!this._liveStallStart) {
+          this._liveStallStart = performance.now();
+        } else if (performance.now() - this._liveStallStart > 1500) {
+          console.log(`[LAM Live] Stream ended (audio playback complete at ${(elapsedMs/1000).toFixed(1)}s, frame ${frameIndex}/${this.frameBuffer.length})`);
+          this.liveStreamStartTime = null;
+          this.liveStreamConsumedIndex = 0;
+          this.liveStreamIsFinal = false;
+          this.frameBuffer = [];
+          this.fadeOutStartTime = performance.now();
+          this._lastLiveFrameIndex = -1;
+          this._liveStallStart = null;
+          // → 下の fade-out パスで処理
+        }
+      } else {
+        this._lastLiveFrameIndex = frameIndex;
+        this._liveStallStart = null;
+      }
+
+      if (this.liveStreamStartTime !== null && frameIndex >= 0 && frameIndex < this.frameBuffer.length) {
         this.expressionData = {};
         const frame = this.frameBuffer[frameIndex];
         const fadeAlpha = frameIndex < this.FADE_IN_FRAMES
@@ -631,7 +676,7 @@ class LAMAvatarController {
             `[LAM Live-Sync] Frame ${frameIndex}/${this.frameBuffer.length}: ` +
             `jaw=${(f['jawOpen']||0).toFixed(3)}, mouth=${(f['mouthLowerDownLeft']||0).toFixed(3)}, ` +
             `funnel=${(f['mouthFunnel']||0).toFixed(3)}, smile=${(f['mouthSmileLeft']||0).toFixed(3)}, ` +
-            `pucker=${(f['mouthPucker']||0).toFixed(3)}, elapsed=${elapsedMs.toFixed(0)}ms`
+            `pucker=${(f['mouthPucker']||0).toFixed(3)}, audioTime=${(elapsedMs/1000).toFixed(1)}s`
           );
         }
 
@@ -640,10 +685,9 @@ class LAMAvatarController {
         }
         return this.safeReturnExpression();
 
-      } else if (frameIndex >= this.frameBuffer.length) {
+      } else if (this.liveStreamStartTime !== null && frameIndex >= this.frameBuffer.length) {
         // バッファ末端到達
         if (this.liveStreamIsFinal) {
-          // ★ is_final 受信済み → 全フレーム再生完了、即座にストリーム終了
           console.log(`[LAM Live] Stream ended (all ${this.frameBuffer.length} frames played, is_final=true)`);
           this.liveStreamStartTime = null;
           this.liveStreamConsumedIndex = 0;
@@ -652,9 +696,10 @@ class LAMAvatarController {
           this.fadeOutStartTime = performance.now();
         } else {
           // is_final 未受信 → 新しいチャンクが来るか待つ（最大2秒）
-          const waitMs = elapsedMs - (this.frameBuffer.length / this.frameRate * 1000);
+          const wallElapsed = performance.now() - this.liveStreamStartTime;
+          const bufferEndMs = this.frameBuffer.length / this.frameRate * 1000;
+          const waitMs = wallElapsed - bufferEndMs;
           if (waitMs < 2000) {
-            // 最後のフレームをホールド
             const lastFrame = this.frameBuffer[this.frameBuffer.length - 1];
             if (lastFrame) {
               this.expressionData = {};
@@ -664,7 +709,6 @@ class LAMAvatarController {
             }
             return this.safeReturnExpression();
           }
-          // 2秒以上新チャンクなし → ストリーム終了（フォールバック）
           console.log(`[LAM Live] Stream ended (no new chunks for ${waitMs.toFixed(0)}ms)`);
           this.liveStreamStartTime = null;
           this.liveStreamConsumedIndex = 0;
@@ -898,6 +942,8 @@ class LAMAvatarController {
     this.liveStreamIsFinal = false;
     this.frameBuffer = [];
     this.fadeOutStartTime = performance.now();
+    this._lastLiveFrameIndex = -1;
+    this._liveStallStart = null;
   }
 
   /**

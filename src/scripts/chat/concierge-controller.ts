@@ -51,6 +51,12 @@ export class ConciergeController extends CoreController {
       const lam = (window as any).lamAvatarController;
       if (lam && typeof lam.setExternalTtsPlayer === 'function') {
         lam.setExternalTtsPlayer(this.ttsPlayer);
+        // ★ Live API 音声同期: AudioContext ベースの再生時間を LAMAvatar に提供
+        // performance.now() ではなく実際の音声再生位置でフレームを進行させる
+        if (typeof lam.setLiveAudioTimeGetter === 'function') {
+          lam.setLiveAudioTimeGetter(() => this.dialogueManager.getAudioPlaybackTime());
+          console.log(`[Concierge] Live audio time getter linked with LAMAvatar`);
+        }
         linked = true;
         console.log(`[Concierge] TTS player linked with LAMAvatar (attempt #${linkAttempts})`);
         return true;

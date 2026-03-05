@@ -81,6 +81,15 @@ export class DialogueManager {
   // イベントハンドラ
   private eventHandlers: Map<string, EventHandler[]> = new Map();
 
+  /**
+   * 音声再生経過時間を取得（秒）
+   * AudioContext ベースで、スケジュール済み音声の末端でキャップされる
+   * LAMAvatar がフレーム同期に使用
+   */
+  getAudioPlaybackTime(): number {
+    return this.audioIO?.playbackCurrentTime ?? 0;
+  }
+
   constructor(apiBase: string, backendUrl: string = '') {
     this.apiBase = apiBase;
     this.backendUrl = backendUrl;
