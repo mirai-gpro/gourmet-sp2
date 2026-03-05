@@ -168,6 +168,8 @@ export class ConciergeController extends CoreController {
     if (!lamController || !data?.names || !data?.frames?.length) return;
 
     const frameRate = data.frame_rate || 30;
+    const chunkIndex: number | undefined = (data as any).chunk_index;
+    const isFinal: boolean = !!(data as any).is_final;
     this.liveExpressionChunkCount++;
 
     // ★ 生データ診断: 最初の3チャンクをログ
@@ -178,12 +180,12 @@ export class ConciergeController extends CoreController {
       const jawIdx = data.names.indexOf('jawOpen');
       const funnelIdx = data.names.indexOf('mouthFunnel');
       console.log(
-        `[Live Expr RAW] chunk#${this.liveExpressionChunkCount}: ` +
+        `[Live Expr RAW] chunk#${chunkIndex ?? this.liveExpressionChunkCount}: ` +
         `${data.frames.length} frames, ${data.names.length} channels, ` +
         `maxVal=${maxVal.toFixed(4)}, ` +
         `jawOpen[${jawIdx}]=${(values[jawIdx] || 0).toFixed(4)}, ` +
         `mouthFunnel[${funnelIdx}]=${(values[funnelIdx] || 0).toFixed(4)}, ` +
-        `first5vals=[${values.slice(0, 5).map(v => (v||0).toFixed(3)).join(',')}]`
+        `is_final=${isFinal}`
       );
     }
 
@@ -204,7 +206,7 @@ export class ConciergeController extends CoreController {
     // _audioStartTime: 音声再生開始時刻（DialogueManager が付与）
     // バックエンドが turn_complete 後に一括送信する場合、音声開始時刻を基準に同期する
     const audioStartTime = (data as any)._audioStartTime || null;
-    lamController.queueLiveExpressionFrames(frames, frameRate, audioStartTime);
+    lamController.queueLiveExpressionFrames(frames, frameRate, audioStartTime, isFinal, chunkIndex);
   }
 
   // ========================================
