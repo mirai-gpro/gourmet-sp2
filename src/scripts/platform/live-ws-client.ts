@@ -23,6 +23,8 @@
 export interface LiveWSClientOptions {
   wsUrl: string;
   connectTimeout?: number;
+  autoReconnect?: boolean;
+  maxReconnectAttempts?: number;
 }
 
 export type LiveWSMessageType =
@@ -51,17 +53,28 @@ type LiveWSConnectionHandler = (connected: boolean) => void;
 export class LiveWSClient {
   private ws: WebSocket | null = null;
   private wsUrl: string;
+  private resolvedUrl: string = '';
   private connectTimeout: number;
   private handlers: Map<string, LiveWSEventHandler[]> = new Map();
   private connectionHandlers: LiveWSConnectionHandler[] = [];
   private _isConnected = false;
 
+  // Auto-reconnect
+  private autoReconnect: boolean;
+  private maxReconnectAttempts: number;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private intentionalClose = false;
+
   constructor(options: LiveWSClientOptions) {
     this.wsUrl = options.wsUrl;
     this.connectTimeout = options.connectTimeout ?? 10000;
+    this.autoReconnect = options.autoReconnect ?? true;
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
   }
 
   async connect(): Promise<void> {
+    this.intentionalClose = false;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error('WebSocket connection timeout'));
@@ -74,11 +87,13 @@ export class LiveWSClient {
           ? this.wsUrl
           : `${protocol}//${host}${this.wsUrl}`;
 
+        this.resolvedUrl = url;
         this.ws = new WebSocket(url);
 
         this.ws.onopen = () => {
           clearTimeout(timer);
           this._isConnected = true;
+          this.reconnectAttempts = 0;
           this.notifyConnection(true);
           console.log('[LiveWSClient] Connected:', url);
           resolve();
@@ -86,15 +101,98 @@ export class LiveWSClient {
 
         this.ws.onclose = (event) => {
           clearTimeout(timer);
+          const wasConnected = this._isConnected;
           this._isConnected = false;
           this.notifyConnection(false);
           console.log(`[LiveWSClient] Closed: code=${event.code}, reason=${event.reason}`);
+
+          // 異常切断時に自動再接続を試行
+          if (wasConnected && !this.intentionalClose && this.autoReconnect) {
+            this.scheduleReconnect();
+          }
         };
 
         this.ws.onerror = (event) => {
           clearTimeout(timer);
           console.error('[LiveWSClient] Error:', event);
-          reject(new Error('WebSocket connection error'));
+          // If we haven't connected yet, reject the promise
+          if (!this._isConnected) {
+            reject(new Error('WebSocket connection error'));
+          }
+        };
+
+        this.ws.onmessage = (event) => {
+          this.handleMessage(event.data);
+        };
+      } catch (e) {
+        clearTimeout(timer);
+        reject(e);
+      }
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.warn(`[LiveWSClient] Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up`);
+      return;
+    }
+
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 16000);
+    this.reconnectAttempts++;
+    console.log(`[LiveWSClient] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.reconnectInternal();
+      } catch (e) {
+        console.warn(`[LiveWSClient] Reconnect attempt ${this.reconnectAttempts} failed:`, e);
+        // Try again
+        if (!this.intentionalClose) {
+          this.scheduleReconnect();
+        }
+      }
+    }, delay);
+  }
+
+  private async reconnectInternal(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('WebSocket reconnect timeout'));
+      }, this.connectTimeout);
+
+      try {
+        this.ws = new WebSocket(this.resolvedUrl);
+
+        this.ws.onopen = () => {
+          clearTimeout(timer);
+          this._isConnected = true;
+          this.reconnectAttempts = 0;
+          this.notifyConnection(true);
+          console.log('[LiveWSClient] Reconnected:', this.resolvedUrl);
+          resolve();
+        };
+
+        this.ws.onclose = (event) => {
+          clearTimeout(timer);
+          const wasConnected = this._isConnected;
+          this._isConnected = false;
+          this.notifyConnection(false);
+          console.log(`[LiveWSClient] Closed after reconnect: code=${event.code}, reason=${event.reason}`);
+
+          if (wasConnected && !this.intentionalClose && this.autoReconnect) {
+            this.scheduleReconnect();
+          } else if (!wasConnected) {
+            reject(new Error('WebSocket closed during reconnect'));
+          }
+        };
+
+        this.ws.onerror = (event) => {
+          clearTimeout(timer);
+          console.error('[LiveWSClient] Reconnect error:', event);
+          if (!this._isConnected) {
+            reject(new Error('WebSocket reconnect error'));
+          }
         };
 
         this.ws.onmessage = (event) => {
@@ -108,6 +206,11 @@ export class LiveWSClient {
   }
 
   disconnect(): void {
+    this.intentionalClose = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       this.sendJson({ type: 'stop' });
       this.ws.close();
