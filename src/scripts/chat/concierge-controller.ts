@@ -203,10 +203,11 @@ export class ConciergeController extends CoreController {
     });
 
     // ★ Live API はリアルタイムクロック同期を使用（ttsPlayerは不使用）
-    // _audioStartTime: 音声再生開始時刻（DialogueManager が付与）
-    // バックエンドが turn_complete 後に一括送信する場合、音声開始時刻を基準に同期する
-    const audioStartTime = (data as any)._audioStartTime || null;
-    lamController.queueLiveExpressionFrames(frames, frameRate, audioStartTime, isFinal, chunkIndex);
+    // _audioPlaybackTime: AudioContext の実再生経過時間（秒）
+    // performance.now() ではなく AudioContext.currentTime ベースなので
+    // デコード・スケジュール遅延を含む正確な音声再生位置を示す
+    const audioPlaybackTimeSec: number = (data as any)._audioPlaybackTime || 0;
+    lamController.queueLiveExpressionFrames(frames, frameRate, audioPlaybackTimeSec, isFinal, chunkIndex);
   }
 
   // ========================================
@@ -259,10 +260,18 @@ export class ConciergeController extends CoreController {
         } catch (_e) { }
       });
 
-      await Promise.all([
-        this.speakTextGCP(greetingText),
-        ...ackPromises
-      ]);
+      if (this.dialogueType === 'live') {
+        // Live モード: 挨拶音声は Live API (Gemini) から配信される
+        // REST TTS は呼ばない（二重再生・expression 競合を防止）
+        // Ack の事前生成のみ実行
+        await Promise.all(ackPromises);
+      } else {
+        // REST モード: 従来通り REST TTS で挨拶再生
+        await Promise.all([
+          this.speakTextGCP(greetingText),
+          ...ackPromises
+        ]);
+      }
 
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;

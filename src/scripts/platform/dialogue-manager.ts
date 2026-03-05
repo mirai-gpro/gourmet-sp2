@@ -264,20 +264,22 @@ export class DialogueManager {
 
     this.wsClient.on('audio', (msg: LiveWSMessage) => {
       if (msg.data && this.audioIO) {
-        // 最初の音声チャンク受信時刻を記録（expression 同期用）
+        // 音声をキューに追加（AudioContext 内部で正確な再生タイミングが管理される）
+        this.audioIO.queuePlayback(msg.data);
+        // 最初の音声チャンク到着を記録（ログ用）
         if (this._liveAudioStartTime === null) {
           this._liveAudioStartTime = performance.now();
           console.log(`[DialogueManager] First audio chunk received at ${this._liveAudioStartTime.toFixed(0)}ms`);
         }
-        this.audioIO.queuePlayback(msg.data);
       }
       this.emit('ai_audio', msg.data);
     });
 
     this.wsClient.on('transcription', (msg: LiveWSMessage) => {
       if (msg.role === 'user') {
-        // ユーザーが話し始めた → 次のAIターンに備えて音声開始時刻リセット
+        // ユーザーが話し始めた → 次のAIターンに備えてリセット
         this._liveAudioStartTime = null;
+        if (this.audioIO) this.audioIO.resetTurn();
         this.emit('user_text', { text: msg.text, isPartial: msg.is_partial });
       } else if (msg.role === 'ai') {
         this.emit('ai_text', { text: msg.text, isPartial: msg.is_partial });
@@ -285,20 +287,20 @@ export class DialogueManager {
     });
 
     this.wsClient.on('expression', (msg: LiveWSMessage) => {
-      // 音声開始時刻を付与して expression を送出
-      // バックエンドが turn_complete 後に一括送信する場合でも、
-      // 音声再生開始時刻を基準に同期できる
-      if (msg.data) {
-        msg.data._audioStartTime = this._liveAudioStartTime;
+      // AudioContext の実再生時間を付与して expression を送出
+      // audioIO.playbackCurrentTime は AudioContext.currentTime ベースで
+      // 音声チャンク受信→デコード→スケジュール の遅延を含む正確な値
+      if (msg.data && this.audioIO) {
+        msg.data._audioPlaybackTime = this.audioIO.playbackCurrentTime;
       }
       this.emit('expression', msg.data);
     });
 
     this.wsClient.on('interrupted', () => {
       if (this.audioIO) {
-        this.audioIO.stopPlayback();
+        this.audioIO.stopPlayback();  // stopPlayback() 内で resetTurn() も呼ばれる
       }
-      this._liveAudioStartTime = null;  // 次のターンに備えてリセット
+      this._liveAudioStartTime = null;
       this.emit('interrupted', null);
     });
 
