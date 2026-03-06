@@ -258,11 +258,11 @@ export class AudioManager {
       // ★STEP2: onmessageハンドラー設定
       this.audioWorkletNode.port.onmessage = (event) => {
         const { audioChunk } = event.data;
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !this.canSendAudio) return;
 
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
-          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
+          ws.send(JSON.stringify({ type: 'audio_chunk', chunk: base64, sample_rate: 16000 }));
         } catch (e) { }
       };
 
@@ -270,9 +270,14 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.globalAudioContext.destination);
 
-      // ★WS接続済み = 送信可能（start_stream/stream_ready不要）
+      // ★STEP4: start_stream送信（バックエンドにSTT設定を通知）
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'start_stream', language_code: languageCode, sample_rate: 16000 }));
+      }
+
+      // ★STEP5: 送信許可（start_stream送信後）
       this.canSendAudio = true;
-      
+
       this.recordingTimer = window.setTimeout(() => { 
         this.stopStreaming_iOS();
         onStopCallback();
@@ -424,11 +429,11 @@ export class AudioManager {
       // ★STEP2: onmessageハンドラー設定
       this.audioWorkletNode.port.onmessage = (event) => {
         const { audioChunk } = event.data;
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !this.canSendAudio) return;
 
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
-          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
+          ws.send(JSON.stringify({ type: 'audio_chunk', chunk: base64, sample_rate: 16000 }));
         } catch (e) { }
       };
 
@@ -436,7 +441,12 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.audioContext!.destination);
 
-      // ★WS接続済み = 送信可能（start_stream/stream_ready不要）
+      // ★STEP4: start_stream送信（バックエンドにSTT設定を通知）
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'start_stream', language_code: languageCode, sample_rate: 16000 }));
+      }
+
+      // ★STEP5: 送信許可（start_stream送信後）
       this.canSendAudio = true;
 
       // VAD設定

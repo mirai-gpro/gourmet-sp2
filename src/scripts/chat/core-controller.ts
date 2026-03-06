@@ -555,6 +555,7 @@ export class CoreController {
 
   protected stopStreamingSTT() {
     this.audioManager.stopStreaming();
+    this.wsSend({ type: 'stop_stream' });
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
@@ -712,10 +713,191 @@ export class CoreController {
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
     this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 4000);
 
-    // ★ WebSocket経由でテキスト送信（REST POST → WS）
-    this.wsSend({ type: 'text', data: message });
-    this.els.userInput.blur();
-    // レスポンスは handleWsMessage() で処理
+    try {
+      const response = await fetch(`${this.apiBase}/api/v2/rest/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: this.sessionId,
+          message: message,
+          stage: this.currentStage,
+          language: this.currentLanguage,
+          mode: this.currentMode
+        })
+      });
+      const data = await response.json();
+
+      if (this.sessionId !== this.sessionId) return;
+
+      this.hideWaitOverlay();
+      this.currentAISpeech = data.response;
+      this.addMessage('assistant', data.response, data.summary);
+
+      if (!isTextInput && this.isTTSEnabled) {
+        this.stopCurrentAudio();
+      }
+
+      if (data.shops && data.shops.length > 0) {
+        this.currentShops = data.shops;
+        this.els.reservationBtn.classList.add('visible');
+        this.els.userInput.value = '';
+        document.dispatchEvent(new CustomEvent('displayShops', {
+          detail: { shops: data.shops, language: this.currentLanguage }
+        }));
+
+        const section = document.getElementById('shopListSection');
+        if (section) section.classList.add('has-shops');
+        if (window.innerWidth < 1024) {
+          setTimeout(() => {
+            const shopSection = document.getElementById('shopListSection');
+            if (shopSection) shopSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+           }, 300);
+        }
+
+        (async () => {
+          try {
+            this.isAISpeaking = true;
+            if (this.isRecording) { this.stopStreamingSTT(); }
+
+            await this.speakTextGCP(this.t('ttsIntro'), true, false, isTextInput);
+
+            const lines = data.response.split('\n\n');
+            let introText = "";
+            let shopLines = lines;
+            if (lines[0].includes('ご希望に合うお店') && lines[0].includes('ご紹介します')) {
+              introText = lines[0];
+              shopLines = lines.slice(1);
+            }
+
+            let introPart2Promise: Promise<void> | null = null;
+            if (introText && this.isTTSEnabled && this.isUserInteracted && !isTextInput) {
+                const preGeneratedIntro = this.preGeneratedAcks.get(introText);
+              if (preGeneratedIntro) {
+                introPart2Promise = new Promise<void>((resolve) => {
+                  this.lastAISpeech = this.normalizeText(introText);
+                  this.ttsPlayer.src = `data:audio/mp3;base64,${preGeneratedIntro}`;
+                  this.ttsPlayer.onended = () => resolve();
+                  this.ttsPlayer.play();
+                });
+              } else {
+                introPart2Promise = this.speakTextGCP(introText, false, false, isTextInput);
+              }
+            }
+
+            let firstShopAudioPromise: Promise<string | null> | null = null;
+            let remainingAudioPromise: Promise<string | null> | null = null;
+            const shopLangConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
+
+            if (shopLines.length > 0 && this.isTTSEnabled && this.isUserInteracted && !isTextInput) {
+              const firstShop = shopLines[0];
+              const restShops = shopLines.slice(1).join('\n\n');
+              firstShopAudioPromise = (async () => {
+                const cleanText = this.stripMarkdown(firstShop);
+                const resp = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    text: cleanText, language_code: shopLangConfig.tts, voice_name: shopLangConfig.voice
+                  })
+                });
+                const result = await resp.json();
+                return result.success ? `data:audio/mp3;base64,${result.audio}` : null;
+              })();
+
+              if (restShops) {
+                remainingAudioPromise = (async () => {
+                  const cleanText = this.stripMarkdown(restShops);
+                  const resp = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      text: cleanText, language_code: shopLangConfig.tts, voice_name: shopLangConfig.voice
+                    })
+                  });
+                  const result = await resp.json();
+                  return result.success ? `data:audio/mp3;base64,${result.audio}` : null;
+                })();
+              }
+            }
+
+            if (introPart2Promise) await introPart2Promise;
+
+            if (firstShopAudioPromise) {
+              const firstShopAudio = await firstShopAudioPromise;
+              if (firstShopAudio) {
+                const firstShopText = this.stripMarkdown(shopLines[0]);
+                this.lastAISpeech = this.normalizeText(firstShopText);
+
+                if (!isTextInput && this.isTTSEnabled) {
+                  this.stopCurrentAudio();
+                }
+
+                this.ttsPlayer.src = firstShopAudio;
+                await new Promise<void>((resolve) => {
+                  this.ttsPlayer.onended = () => {
+                    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+                    this.els.voiceStatus.className = 'voice-status stopped';
+                    resolve();
+                  };
+                  this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+                  this.els.voiceStatus.className = 'voice-status speaking';
+                  this.ttsPlayer.play();
+                });
+
+                if (remainingAudioPromise) {
+                  const remainingAudio = await remainingAudioPromise;
+                  if (remainingAudio) {
+                    const restShopsText = this.stripMarkdown(shopLines.slice(1).join('\n\n'));
+                    this.lastAISpeech = this.normalizeText(restShopsText);
+                    await new Promise(r => setTimeout(r, 500));
+
+                    if (!isTextInput && this.isTTSEnabled) {
+                      this.stopCurrentAudio();
+                    }
+
+                    this.ttsPlayer.src = remainingAudio;
+                    await new Promise<void>((resolve) => {
+                      this.ttsPlayer.onended = () => {
+                        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+                        this.els.voiceStatus.className = 'voice-status stopped';
+                        resolve();
+                      };
+                      this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+                      this.els.voiceStatus.className = 'voice-status speaking';
+                      this.ttsPlayer.play();
+                    });
+                  }
+                }
+              }
+            }
+            this.isAISpeaking = false;
+          } catch (_e) { this.isAISpeaking = false; }
+        })();
+      } else {
+        if (data.response) {
+          const extractedShops = this.extractShopsFromResponse(data.response);
+          if (extractedShops.length > 0) {
+            this.currentShops = extractedShops;
+            this.els.reservationBtn.classList.add('visible');
+            document.dispatchEvent(new CustomEvent('displayShops', {
+              detail: { shops: extractedShops, language: this.currentLanguage }
+            }));
+            const section = document.getElementById('shopListSection');
+            if (section) section.classList.add('has-shops');
+            this.speakTextGCP(data.response, true, false, isTextInput);
+          } else {
+            this.speakTextGCP(data.response, true, false, isTextInput);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('送信エラー:', error);
+      this.hideWaitOverlay();
+      this.showError('メッセージの送信に失敗しました。');
+    } finally {
+      this.resetInputState();
+      this.els.userInput.blur();
+    }
   }
 
   protected async speakTextGCP(text: string, stopPrevious: boolean = true, autoRestartMic: boolean = false, skipAudio: boolean = false) {
@@ -934,6 +1116,7 @@ export class CoreController {
     this.audioManager.fullResetAudioResources();
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
+    this.wsSend({ type: 'stop_stream' });
     this.stopCurrentAudio();
     this.hideWaitOverlay();
     this.isProcessing = false;
