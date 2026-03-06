@@ -476,7 +476,13 @@ export class CoreController {
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_info: {}, language: this.currentLanguage })
+        // BUG2修正: バックエンドは user_id, mode, language, dialogue_type をトップレベルで期待
+        body: JSON.stringify({
+          mode: this.currentMode,
+          language: this.currentLanguage,
+          dialogue_type: 'live',
+          user_id: this.getUserId()
+        })
       });
       const data = await res.json();
       this.sessionId = data.session_id;
@@ -661,30 +667,12 @@ export class CoreController {
 
     this.addMessage('assistant', ack.text);
 
+    // C5修正: フォールバック応答を削除（バックエンドからWS経由で正式な応答が返る）
     (async () => {
-      try {
-        if (firstAckPromise) await firstAckPromise;
-        const cleanText = this.removeFillers(transcript);
-        const fallbackResponse = this.generateFallbackResponse(cleanText);
-
-        if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(fallbackResponse, false);
-        this.addMessage('assistant', fallbackResponse);
-
-        setTimeout(async () => {
-          const additionalResponse = this.t('additionalResponse');
-          if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(additionalResponse, false);
-          this.addMessage('assistant', additionalResponse);
-        }, 3000);
-
-        if (this.els.userInput.value.trim()) {
-          this.isFromVoiceInput = true;
-          this.sendMessage();
-        }
-      } catch (_error) {
-        if (this.els.userInput.value.trim()) {
-          this.isFromVoiceInput = true;
-          this.sendMessage();
-        }
+      if (firstAckPromise) await firstAckPromise;
+      if (this.els.userInput.value.trim()) {
+        this.isFromVoiceInput = true;
+        this.sendMessage();
       }
     })();
 
