@@ -113,7 +113,16 @@ export class ConciergeController extends CoreController {
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
-      const ackPromises = ackTexts.map(async (text) => {
+      // ★修正: UI即時有効化（TTS完了を待たない）
+      this.els.userInput.disabled = false;
+      this.els.sendBtn.disabled = false;
+      this.els.micBtn.disabled = false;
+      this.els.speakerBtn.disabled = false;
+      this.els.speakerBtn.classList.remove('disabled');
+      this.els.reservationBtn.classList.remove('visible');
+
+      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
+      const ackPreGen = ackTexts.map(async (text) => {
         try {
           const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
             method: 'POST',
@@ -129,18 +138,10 @@ export class ConciergeController extends CoreController {
           }
         } catch (_e) { }
       });
+      Promise.all(ackPreGen).catch(() => {});
 
-      await Promise.all([
-        this.speakTextGCP(greetingText),
-        ...ackPromises
-      ]);
-
-      this.els.userInput.disabled = false;
-      this.els.sendBtn.disabled = false;
-      this.els.micBtn.disabled = false;
-      this.els.speakerBtn.disabled = false;
-      this.els.speakerBtn.classList.remove('disabled');
-      this.els.reservationBtn.classList.remove('visible');
+      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
+      this.speakTextGCP(greetingText).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
