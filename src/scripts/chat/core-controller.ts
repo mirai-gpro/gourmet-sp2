@@ -314,6 +314,7 @@ export class CoreController {
         break;
       case 'audio':
         // AI音声（PCM 24kHz base64）
+        console.log(`[Core] WS audio received: ${msg.data?.length || 0} chars`);
         this.isAISpeaking = true;
         this.playPcmAudio(msg.data);
         break;
@@ -407,6 +408,7 @@ export class CoreController {
 
   // ★ PCM 24kHz音声をWAV形式で再生
   protected playPcmAudio(base64Data: string) {
+    console.log(`[Core] playPcmAudio: data=${base64Data.length} chars, isUserInteracted=${this.isUserInteracted}`);
     const pcmBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
 
     // WAVヘッダー生成（PCM 16-bit mono 24kHz）
@@ -684,7 +686,9 @@ export class CoreController {
 
   protected async sendMessage() {
     let firstAckPromise: Promise<void> | null = null;
-    this.unlockAudioParams();
+    // ★修正: テキスト送信もユーザー操作なので isUserInteracted を有効化
+    // （Send ボタン / Enter キー経由時に音声再生が無効のままになるバグを防止）
+    this.enableAudioPlayback();
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
 
