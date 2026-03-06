@@ -198,6 +198,24 @@ const {
 .voice-status.stopped { background: #ffebee; color: #c62828; }
 .voice-status.speaking { background: #e1f5fe; color: #0277bd; animation: pulse 2s infinite; }
 
+/* 音声有効化プロンプト */
+.click-prompt {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.75);
+  color: #fff;
+  padding: 12px 24px;
+  border-radius: 12px;
+  text-align: center;
+  cursor: pointer;
+  z-index: 100;
+  font-size: 14px;
+  animation: pulse 2s infinite;
+}
+.click-prompt p { margin: 4px 0; }
+
 /* チャットエリア - スクロール可能に */
 .chat-area {
   flex: 1;
