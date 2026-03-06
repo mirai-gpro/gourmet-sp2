@@ -65,6 +65,7 @@ export class LiveWSClient {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
+  private _fatalError = false; // クォータ超過等の回復不能エラー
 
   constructor(options: LiveWSClientOptions) {
     this.wsUrl = options.wsUrl;
@@ -75,6 +76,7 @@ export class LiveWSClient {
 
   async connect(): Promise<void> {
     this.intentionalClose = false;
+    this._fatalError = false;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error('WebSocket connection timeout'));
@@ -106,8 +108,8 @@ export class LiveWSClient {
           this.notifyConnection(false);
           console.log(`[LiveWSClient] Closed: code=${event.code}, reason=${event.reason}`);
 
-          // 異常切断時に自動再接続を試行
-          if (wasConnected && !this.intentionalClose && this.autoReconnect) {
+          // 異常切断時に自動再接続を試行（回復不能エラー時は除外）
+          if (wasConnected && !this.intentionalClose && this.autoReconnect && !this._fatalError) {
             this.scheduleReconnect();
           }
         };
@@ -132,6 +134,10 @@ export class LiveWSClient {
   }
 
   private scheduleReconnect(): void {
+    if (this._fatalError) {
+      console.warn('[LiveWSClient] Fatal error (quota/auth) — not reconnecting');
+      return;
+    }
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.warn(`[LiveWSClient] Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up`);
       return;
@@ -180,7 +186,7 @@ export class LiveWSClient {
           this.notifyConnection(false);
           console.log(`[LiveWSClient] Closed after reconnect: code=${event.code}, reason=${event.reason}`);
 
-          if (wasConnected && !this.intentionalClose && this.autoReconnect) {
+          if (wasConnected && !this.intentionalClose && this.autoReconnect && !this._fatalError) {
             this.scheduleReconnect();
           } else if (!wasConnected) {
             reject(new Error('WebSocket closed during reconnect'));
@@ -256,9 +262,25 @@ export class LiveWSClient {
     }
   }
 
+  /** 回復不能エラー（クォータ超過、認証エラー等）かどうか判定 */
+  private isFatalError(msg: LiveWSMessage): boolean {
+    if (msg.type !== 'error') return false;
+    const text = (msg.message || msg.data || '').toLowerCase();
+    return text.includes('quota') || text.includes('billing')
+      || text.includes('authentication') || text.includes('unauthorized')
+      || text.includes('forbidden') || text.includes('api key');
+  }
+
   private handleMessage(raw: string): void {
     try {
       const msg: LiveWSMessage = JSON.parse(raw);
+
+      // 回復不能エラーの場合、自動再接続を停止
+      if (this.isFatalError(msg)) {
+        console.error('[LiveWSClient] Fatal error detected, stopping auto-reconnect:', msg.message || msg.data);
+        this._fatalError = true;
+      }
+
       const handlers = this.handlers.get(msg.type);
       if (handlers) {
         handlers.forEach(h => h(msg));
