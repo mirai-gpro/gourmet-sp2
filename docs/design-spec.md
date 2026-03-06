@@ -9,6 +9,7 @@
 | ①オリジナル | [mirai-gpro/gourmet-sp](https://github.com/mirai-gpro/gourmet-sp) | 正常動作するベースライン。REST API v1 |
 | ②アバターパッチ | [LAM_gpro/.../gourmet-sp](https://github.com/mirai-gpro/LAM_gpro/tree/claude/fix-modelscope-wheels-mpGPD/gourmet-sp) | LAMAvatar 3Dアバター統合 |
 | ③API v2 移行 | gourmet-sp2（本リポジトリ） | バックエンドLive API v2対応に伴うエンドポイントパス変更 |
+| ④WebSocket移行 | gourmet-sp2（本リポジトリ） | Socket.IO → ネイティブWebSocket移行 |
 
 ### レイヤー別変更一覧
 
@@ -51,42 +52,32 @@
 
 **ロジック変更:** `initSocket()` の接続先を `this.apiBase` → `this.container.dataset.backendUrl` に変更
 
+#### ④WebSocket移行（③→④の差分）
+
+**背景:** バックエンド v2 で Socket.IO が廃止され、ネイティブ WebSocket (`/api/v2/live/{session_id}`) に変更された。
+
+**主な変更:**
+- Socket.IO (`io()`) → ネイティブ WebSocket (`new WebSocket()`)
+- 接続タイミング: コンストラクタ → `initializeSession()` 内（`ws_url` 取得後）
+- `sendMessage()`: REST POST → WebSocket テキスト送信
+- AI応答・音声・表情・ショップ: REST レスポンス → WebSocket 受信ハンドラ
+- 音声ストリーミング: `socket.emit('audio_chunk')` → `ws.send({type:'audio', data:base64})`
+- `stream_ready` 待機ロジック削除
+
+**詳細:** → `docs/04-websocket-migration-spec.md` 参照
+
 ---
 
 ## 2. 現在の問題
 
-### 症状
-コンシェルジュページ (`/concierge`) でマイクボタン・テキスト入力・全操作が反応しない。
+### 解決済み
+- ③ `apiBase` / `backendUrl` 混同問題 → 分離済み
 
-### 原因
-`Concierge.astro` / `GourmetChat.astro` のスクリプトで:
-```typescript
-const apiBase = container.dataset.backendUrl || container.dataset.apiBase || '';
-```
-`backendUrl`（Socket.IO直接接続用）が `apiBase` として取得され、HTTP fetch 呼び出しがバックエンドに直接送信されてしまう（クロスオリジン → CORS でブロック）。
-
-仕様書③の設計意図（HTTP=same-origin / Socket.IO=直接接続）と実装が不一致。
-
-### 修正内容
-仕様書③の設計通り、`apiBase`（HTTP用）と `backendUrl`（Socket.IO用）を分離する:
-
-1. **`Concierge.astro` / `GourmetChat.astro`**: `apiBase = container.dataset.apiBase || ''`（`backendUrl` を混ぜない）
-2. **`concierge-controller.ts` `initSocket()`**: `io(this.container.dataset.backendUrl || window.location.origin)`
-3. **`core-controller.ts` `initSocket()`**: 同上
+### 対応中
+- ④ Socket.IO → WebSocket 移行（バックエンド v2 で Socket.IO 廃止済み）
 
 ---
 
-## 3. 修正対象ファイル
+## 3. 承認待ち
 
-| ファイル | 修正内容 |
-|---|---|
-| `Concierge.astro` | スクリプト: `apiBase` から `backendUrl` を除外 |
-| `GourmetChat.astro` | スクリプト: `apiBase` から `backendUrl` を除外 |
-| `concierge-controller.ts` | `initSocket()`: `backendUrl` を `data-backend-url` から取得 |
-| `core-controller.ts` | `initSocket()`: `backendUrl` を `data-backend-url` から取得 |
-
----
-
-## 4. 承認待ち
-
-上記修正内容の承認をお願いします。
+仕様変更書④（`docs/04-websocket-migration-spec.md`）の承認をお願いします。
