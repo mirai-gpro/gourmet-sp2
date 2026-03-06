@@ -154,6 +154,7 @@ export class ConciergeController extends CoreController {
     switch (msg.type) {
       case 'audio':
         // B5: AI音声（PCM 24kHz）— expressionと同期再生するためバッファリング
+        console.log(`[Concierge] WS audio received: ${msg.data?.length || 0} chars, isUserInteracted=${this.isUserInteracted}`);
         this.isAISpeaking = true;
         if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
         this.pendingLiveAudio = msg.data;
@@ -168,6 +169,7 @@ export class ConciergeController extends CoreController {
         break;
       case 'expression':
         // B5: アバター表情データ — audioと同期再生するためバッファリング
+        console.log(`[Concierge] WS expression received: names=${msg.data?.names?.length || 0}, frames=${msg.data?.frames?.length || 0}`);
         this.pendingExpression = msg.data;
         if (this.expressionWaitTimer) {
           clearTimeout(this.expressionWaitTimer);
@@ -177,6 +179,7 @@ export class ConciergeController extends CoreController {
         break;
       case 'rest_audio':
         // TTS音声（MP3）with アバターアニメーション（expressionを伴わない）
+        console.log(`[Concierge] WS rest_audio received: ${msg.data?.length || 0} chars, text=${msg.text?.substring(0, 50) || 'none'}`);
         this.isAISpeaking = true;
         if (this.isRecording) this.stopStreamingSTT();
         if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
@@ -237,7 +240,9 @@ export class ConciergeController extends CoreController {
 
   // B5: audio + expression が両方揃ったら同時再生開始
   private _tryStartSyncedPlayback() {
+    console.log(`[Concierge] _tryStartSyncedPlayback: audio=${!!this.pendingLiveAudio}, expression=${!!this.pendingExpression}`);
     if (this.pendingLiveAudio && this.pendingExpression) {
+      console.log('[Concierge] Both audio+expression ready, starting synced playback');
       // 表情フレームをアバターにキューイング（音声と同時スタートで自動同期）
       this.applyExpressionFromTts(this.pendingExpression);
       // 音声再生開始
@@ -249,7 +254,9 @@ export class ConciergeController extends CoreController {
 
   // ★ PCM音声再生（アバターアニメーション付き）
   private playPcmAudioWithAvatar(base64Data: string) {
+    console.log(`[Concierge] playPcmAudioWithAvatar: data=${base64Data.length} chars, isUserInteracted=${this.isUserInteracted}`);
     const pcmBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    console.log(`[Concierge] PCM bytes: ${pcmBytes.length} bytes (~${(pcmBytes.length / (24000 * 2)).toFixed(1)}s)`);
 
     // WAVヘッダー生成（PCM 16-bit mono 24kHz）
     const header = new ArrayBuffer(44);
@@ -289,12 +296,16 @@ export class ConciergeController extends CoreController {
     this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
     this.els.voiceStatus.className = 'voice-status speaking';
     if (this.isUserInteracted) {
-      this.ttsPlayer.play().catch(() => {
+      this.ttsPlayer.play().then(() => {
+        console.log('[Concierge] PCM audio play() started successfully');
+      }).catch((err) => {
+        console.error('[Concierge] PCM audio play() FAILED:', err);
         this.isAISpeaking = false;
         this.stopAvatarAnimation();
         URL.revokeObjectURL(url);
       });
     } else {
+      console.warn('[Concierge] PCM audio SKIPPED: isUserInteracted=false');
       this.isAISpeaking = false;
       this.stopAvatarAnimation();
       URL.revokeObjectURL(url);
@@ -338,6 +349,7 @@ export class ConciergeController extends CoreController {
       const data = await response.json();
 
       if (data.success && data.audio) {
+        console.log(`[Concierge] speakTextGCP: audio=${data.audio.length} chars, expression=${!!data.expression}, isUserInteracted=${this.isUserInteracted}`);
         // ★ TTS応答に同梱されたExpressionを即バッファ投入（遅延ゼロ）
         if (data.expression) this.applyExpressionFromTts(data.expression);
         this.ttsPlayer.src = `data:audio/mp3;base64,${data.audio}`;
@@ -538,6 +550,11 @@ export class ConciergeController extends CoreController {
   // ========================================
   protected async sendMessage() {
     let firstAckPromise: Promise<void> | null = null;
+    // ★修正: テキスト送信もユーザー操作なので isUserInteracted を有効化
+    // （Send ボタン / Enter キー経由時に音声再生が無効のままになるバグを防止）
+    if (!this.isUserInteracted) {
+      this.isUserInteracted = true;
+    }
     // ★ voice入力時はunlockAudioParamsスキップ（ack再生中のttsPlayerを中断させない）
     if (!this.pendingAckPromise) {
       this.unlockAudioParams();
