@@ -90,6 +90,14 @@ export class DialogueManager {
     return this.audioIO?.playbackCurrentTime ?? 0;
   }
 
+  /**
+   * Live API 音声の現在振幅（RMS, 0〜1）
+   * バックエンドから expression データが来ない場合のリップシンクフォールバック用
+   */
+  getLiveAmplitude(): number {
+    return this.audioIO?.currentAmplitude ?? 0;
+  }
+
   constructor(apiBase: string, backendUrl: string = '') {
     this.apiBase = apiBase;
     this.backendUrl = backendUrl;

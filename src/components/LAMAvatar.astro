@@ -183,6 +183,17 @@ class LAMAvatarController {
   private _liveStallStart: number | null = null;
   private liveStreamIsFinal: boolean = false;
 
+  // ★ 振幅ベースリップシンクフォールバック
+  // バックエンドから expression データが来ない場合に、
+  // 音声振幅を解析して基本的な口の動きを生成する
+  private ttsAnalyserCtx: AudioContext | null = null;
+  private ttsAnalyserNode: AnalyserNode | null = null;
+  private ttsAnalyserData: Uint8Array | null = null;
+  private ttsMediaSource: MediaElementAudioSourceNode | null = null;
+  private liveAmplitudeGetter: (() => number) | null = null;
+  private amplitudeSmoothed: number = 0;
+  private amplitudeFallbackActive: boolean = false;
+
   // Frame buffer for expression
   private frameBuffer: ExpressionData[] = [];
   private frameRate: number = 30;
@@ -268,6 +279,26 @@ class LAMAvatarController {
     player.addEventListener('pause', this.ttsPauseHandler);
     player.addEventListener('ended', this.ttsEndedHandler);
 
+    // ★ 振幅解析用AnalyserNodeを接続（リップシンクフォールバック）
+    // expression データが来ない場合に音声振幅から口の動きを生成
+    try {
+      if (!this.ttsMediaSource) {
+        // @ts-ignore
+        const AC = window.AudioContext || window.webkitAudioContext;
+        this.ttsAnalyserCtx = new AC();
+        this.ttsMediaSource = this.ttsAnalyserCtx.createMediaElementSource(player);
+        this.ttsAnalyserNode = this.ttsAnalyserCtx.createAnalyser();
+        this.ttsAnalyserNode.fftSize = 256;
+        this.ttsAnalyserNode.smoothingTimeConstant = 0.3;
+        this.ttsAnalyserData = new Uint8Array(this.ttsAnalyserNode.frequencyBinCount);
+        this.ttsMediaSource.connect(this.ttsAnalyserNode);
+        this.ttsAnalyserNode.connect(this.ttsAnalyserCtx.destination);
+        console.log('[LAM Avatar] TTS amplitude analyser connected');
+      }
+    } catch (e) {
+      console.warn('[LAM Avatar] Failed to create TTS amplitude analyser:', e);
+    }
+
     this.externalTtsLinked = true;
     console.log('[LAM Avatar] External TTS player linked');
   }
@@ -279,6 +310,15 @@ class LAMAvatarController {
   public setLiveAudioTimeGetter(getter: () => number): void {
     this.liveAudioTimeGetter = getter;
     console.log('[LAM Avatar] Live audio time getter set');
+  }
+
+  /**
+   * Live API 振幅取得関数を設定（リップシンクフォールバック用）
+   * LiveAudioIO.currentAmplitude を参照する関数を渡す
+   */
+  public setLiveAmplitudeGetter(getter: () => number): void {
+    this.liveAmplitudeGetter = getter;
+    console.log('[LAM Avatar] Live amplitude getter set');
   }
 
   public setSyncMode(mode: 'bundled' | 'external'): void {
@@ -828,6 +868,65 @@ class LAMAvatarController {
           this.resetExpression();
           this.setChatState('Idle');
         }
+      }
+    }
+
+    // ★ 振幅ベースリップシンクフォールバック
+    // バックエンドから expression データが来ない場合（buffer 空）でも、
+    // 音声振幅を解析して基本的な口の動きを生成する
+    {
+      let amplitude = 0;
+      let isFallbackCandidate = false;
+
+      // TTS player 経路: ttsActive かつ buffer 空
+      if (this.ttsActive && this.frameBuffer.length === 0 && this.ttsAnalyserNode && this.ttsAnalyserData) {
+        this.ttsAnalyserNode.getByteTimeDomainData(this.ttsAnalyserData);
+        let sum = 0;
+        for (let i = 0; i < this.ttsAnalyserData.length; i++) {
+          const val = (this.ttsAnalyserData[i] - 128) / 128;
+          sum += val * val;
+        }
+        amplitude = Math.sqrt(sum / this.ttsAnalyserData.length);
+        isFallbackCandidate = true;
+      }
+      // Live API 経路: 音声再生中かつ buffer 空
+      else if (this.liveAmplitudeGetter && this.frameBuffer.length === 0) {
+        amplitude = this.liveAmplitudeGetter();
+        if (amplitude > 0.005) isFallbackCandidate = true;
+      }
+
+      if (isFallbackCandidate && amplitude > 0.01) {
+        // スムージング: 急激な変化を抑えて自然な動きに
+        this.amplitudeSmoothed = this.amplitudeSmoothed * 0.55 + amplitude * 0.45;
+        const a = this.amplitudeSmoothed;
+
+        // 振幅 → blendshape マッピング
+        // 基本的な口の開閉 + わずかな横広がりで自然な発話を近似
+        this.expressionData = createDefaultExpressionData();
+        this.expressionData['jawOpen'] = Math.min(0.5, a * 3.0);
+        this.expressionData['mouthLowerDownLeft'] = Math.min(0.3, a * 2.0);
+        this.expressionData['mouthLowerDownRight'] = Math.min(0.3, a * 2.0);
+        this.expressionData['mouthUpperUpLeft'] = Math.min(0.15, a * 0.8);
+        this.expressionData['mouthUpperUpRight'] = Math.min(0.15, a * 0.8);
+        this.expressionData['mouthFunnel'] = Math.min(0.2, a * 1.0);
+        this.expressionData['mouthStretchLeft'] = Math.min(0.15, a * 0.6);
+        this.expressionData['mouthStretchRight'] = Math.min(0.15, a * 0.6);
+
+        if (!this.amplitudeFallbackActive) {
+          this.amplitudeFallbackActive = true;
+          console.log('[LAM Amplitude] Fallback activated (no expression data from backend)');
+        }
+
+        if (this.currentState !== 'Responding') {
+          this.setChatState('Responding');
+        }
+        return this.safeReturnExpression();
+      }
+
+      // 振幅が閾値以下 → フォールバック終了
+      if (this.amplitudeFallbackActive && !isFallbackCandidate) {
+        this.amplitudeFallbackActive = false;
+        this.amplitudeSmoothed = 0;
       }
     }
 
