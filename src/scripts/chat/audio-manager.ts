@@ -262,7 +262,7 @@ export class AudioManager {
 
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
-          ws.send(JSON.stringify({ type: 'audio_chunk', chunk: base64, sample_rate: 16000 }));
+          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
         } catch (e) { }
       };
 
@@ -270,15 +270,10 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.globalAudioContext.destination);
 
-      // ★STEP4: start_stream送信（バックエンドにSTT設定を通知）
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'start_stream', language_code: languageCode, sample_rate: 16000 }));
-      }
-
-      // ★STEP5: 送信許可（start_stream送信後）
+      // ★STEP4: 送信許可（WS接続済み＝音声送信可能、start_stream不要）
       this.canSendAudio = true;
 
-      this.recordingTimer = window.setTimeout(() => { 
+      this.recordingTimer = window.setTimeout(() => {
         this.stopStreaming_iOS();
         onStopCallback();
       }, this.MAX_RECORDING_TIME);
@@ -433,7 +428,7 @@ export class AudioManager {
 
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
-          ws.send(JSON.stringify({ type: 'audio_chunk', chunk: base64, sample_rate: 16000 }));
+          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
         } catch (e) { }
       };
 
@@ -441,12 +436,7 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.audioContext!.destination);
 
-      // ★STEP4: start_stream送信（バックエンドにSTT設定を通知）
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'start_stream', language_code: languageCode, sample_rate: 16000 }));
-      }
-
-      // ★STEP5: 送信許可（start_stream送信後）
+      // ★STEP4: 送信許可（WS接続済み＝音声送信可能、start_stream不要）
       this.canSendAudio = true;
 
       // VAD設定
