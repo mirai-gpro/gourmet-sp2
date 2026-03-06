@@ -265,9 +265,9 @@ export class AudioManager {
    */
   public async playPcmAudio(base64Data: string, sampleRate: number = 24000): Promise<void> {
     if (!base64Data) return;
-    const gen = ++this.playbackGeneration;
     const ctx = await this.ensureAudioContext();
     this.stopPlayback();
+    const gen = ++this.playbackGeneration;
 
     // Base64 → Int16 PCM → Float32
     const raw = atob(base64Data);
@@ -290,9 +290,9 @@ export class AudioManager {
    */
   public async playMp3Audio(base64Data: string): Promise<void> {
     if (!base64Data) return;
-    const gen = ++this.playbackGeneration;
     const ctx = await this.ensureAudioContext();
     this.stopPlayback();
+    const gen = ++this.playbackGeneration;
 
     // Base64 → ArrayBuffer → decodeAudioData
     const raw = atob(base64Data);
