@@ -4,74 +4,11 @@
 import { CoreController } from './core-controller';
 import { AudioManager } from './audio-manager';
 
-/**
- * ネイティブWebSocketをSocket.IO互換インターフェースでラップ
- * AudioManagerが socket.emit / socket.on / socket.connected を使うため
- */
-class WebSocketAdapter {
-  private ws: WebSocket | null = null;
-  private handlers: Map<string, Function[]> = new Map();
-  private onceHandlers: Map<string, Function[]> = new Map();
-
-  get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
-  }
-
-  open(url: string) {
-    this.ws = new WebSocket(url);
-    this.ws.onopen = () => this.trigger('connect');
-    this.ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        const type = msg.type;
-        this.trigger(type, msg);
-      } catch (_e) { }
-    };
-    this.ws.onclose = () => this.trigger('disconnect');
-    this.ws.onerror = () => this.trigger('error', { message: 'WebSocket error' });
-  }
-
-  emit(event: string, data?: any) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: event, ...(data || {}) }));
-    }
-  }
-
-  on(event: string, handler: Function) {
-    if (!this.handlers.has(event)) this.handlers.set(event, []);
-    this.handlers.get(event)!.push(handler);
-  }
-
-  once(event: string, handler: Function) {
-    if (!this.onceHandlers.has(event)) this.onceHandlers.set(event, []);
-    this.onceHandlers.get(event)!.push(handler);
-  }
-
-  connect() {
-    // バックグラウンド復帰時のreconnect用 - 同じURLで再接続
-    if (this.ws && this.ws.readyState === WebSocket.CLOSED && this.ws.url) {
-      this.open(this.ws.url);
-    }
-  }
-
-  close() {
-    this.ws?.close();
-  }
-
-  private trigger(event: string, data?: any) {
-    this.handlers.get(event)?.forEach(h => h(data));
-    const once = this.onceHandlers.get(event);
-    if (once) {
-      once.forEach(h => h(data));
-      this.onceHandlers.delete(event);
-    }
-  }
-}
+declare const io: any;
 
 export class ConciergeController extends CoreController {
   // Audio2Expression はバックエンドTTSエンドポイント経由で統合済み
   private pendingAckPromise: Promise<void> | null = null;
-  private wsAdapter: WebSocketAdapter | null = null;
 
   constructor(container: HTMLElement, apiBase: string) {
     super(container, apiBase);
@@ -148,14 +85,6 @@ export class ConciergeController extends CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // ★ WebSocket接続: session/startが返したws_urlに接続
-      if (data.ws_url && this.wsAdapter) {
-        const wsBase = this.apiBase.replace(/^http/, 'ws');
-        const wsUrl = `${wsBase}${data.ws_url}`;
-        console.log('[Concierge] Connecting WebSocket:', wsUrl);
-        this.wsAdapter.open(wsUrl);
-      }
-
       // リップシンク: バックエンドTTSエンドポイント経由で表情データ取得（追加接続不要）
 
       // ✅ バックエンドからの初回メッセージを使用（長期記憶対応）
@@ -203,17 +132,14 @@ export class ConciergeController extends CoreController {
   }
 
   // ========================================
-  // 🔧 ネイティブWebSocketアダプターで初期化（Socket.IO不要）
+  // 🔧 Socket.IOの初期化をオーバーライド
   // ========================================
   protected initSocket() {
-    // WebSocketアダプターを作成（接続はinitializeSessionでws_url取得後に行う）
-    this.wsAdapter = new WebSocketAdapter();
-    this.socket = this.wsAdapter;
-
-    this.socket.on('connect', () => {
-      console.log('[Concierge] WebSocket connected');
-    });
-
+    // @ts-ignore
+    this.socket = io(this.apiBase || window.location.origin);
+    
+    this.socket.on('connect', () => { });
+    
     // ✅ コンシェルジュ版のhandleStreamingSTTCompleteを呼ぶように再登録
     this.socket.on('transcript', (data: any) => {
       const { text, is_final } = data;
