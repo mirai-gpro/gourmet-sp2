@@ -276,10 +276,14 @@ export class CoreController {
             this.currentAISpeech = "";
           }
         } else if (msg.role === 'ai') {
-          if (!msg.is_partial) {
-            this.hideWaitOverlay();
+          this.hideWaitOverlay();
+          if (msg.is_partial) {
+            // ストリーミング表示: 部分テキストを追記
+            this.updateStreamingMessage('assistant', msg.text);
+          } else {
+            // 確定: バッファクリア → 確定テキストに置換
+            this.finalizeStreamingMessage('assistant', msg.text);
             this.currentAISpeech = msg.text;
-            this.addMessage('assistant', msg.text);
             this.resetInputState();
           }
         }
@@ -345,9 +349,11 @@ export class CoreController {
         break;
       case 'reconnecting':
         console.log('[WS] Reconnecting:', msg.reason);
+        this.showReconnectingUI();
         break;
       case 'reconnected':
         console.log('[WS] Reconnected, session count:', msg.session_count);
+        this.hideReconnectingUI();
         break;
     }
   }
@@ -357,6 +363,46 @@ export class CoreController {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
     }
+  }
+
+  // ストリーミング中のメッセージを更新（末尾の吹き出しに追記）
+  protected updateStreamingMessage(role: string, partialText: string) {
+    const messages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.classList.contains('streaming')) {
+      const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
+      if (content) content.textContent = partialText;
+    } else {
+      this.addMessage(role, partialText);
+      const newMessages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+      const newMsg = newMessages[newMessages.length - 1];
+      if (newMsg) newMsg.classList.add('streaming');
+    }
+  }
+
+  // ストリーミング完了 → 確定テキストに置換
+  protected finalizeStreamingMessage(role: string, finalText: string) {
+    const messages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.classList.contains('streaming')) {
+      const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
+      if (content) content.textContent = finalText;
+      lastMsg.classList.remove('streaming');
+    } else {
+      this.addMessage(role, finalText);
+    }
+  }
+
+  // 再接続中UI表示
+  protected showReconnectingUI() {
+    this.els.voiceStatus.innerHTML = this.t('reconnecting') || '接続中...';
+    this.els.voiceStatus.className = 'voice-status reconnecting';
+  }
+
+  // 再接続完了UI復帰
+  protected hideReconnectingUI() {
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+    this.els.voiceStatus.className = 'voice-status stopped';
   }
 
   // ★ PCM 24kHz音声をWAV形式で再生
@@ -555,7 +601,7 @@ export class CoreController {
 
   protected stopStreamingSTT() {
     this.audioManager.stopStreaming();
-    this.wsSend({ type: 'stop_stream' });
+    // stop_stream 不要: 音声チャンク送信を止めればバックエンドが自動的にSTT完了を検知
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
@@ -694,18 +740,6 @@ export class CoreController {
         } catch (_e) {}
       }
       if (firstAckPromise) await firstAckPromise;
-
-      const cleanText = this.removeFillers(message);
-      const fallbackResponse = this.generateFallbackResponse(cleanText);
-
-      if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(fallbackResponse, false, false, isTextInput);
-      this.addMessage('assistant', fallbackResponse);
-
-      setTimeout(async () => {
-        const additionalResponse = this.t('additionalResponse');
-        if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(additionalResponse, false, false, isTextInput);
-        this.addMessage('assistant', additionalResponse);
-      }, 3000);
     }
 
     this.isFromVoiceInput = false;
@@ -713,15 +747,8 @@ export class CoreController {
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
     this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 4000);
 
-    // ★ WebSocket経由でテキスト送信
-    this.wsSend({
-      type: 'text',
-      session_id: this.sessionId,
-      message: message,
-      stage: this.currentStage,
-      language: this.currentLanguage,
-      mode: this.currentMode
-    });
+    // ★ WebSocket経由でテキスト送信（バックエンド仕様準拠）
+    this.wsSend({ type: 'text', data: message });
     this.els.userInput.blur();
     // レスポンスは handleWsMessage() で処理
   }
@@ -942,7 +969,6 @@ export class CoreController {
     this.audioManager.fullResetAudioResources();
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
-    this.wsSend({ type: 'stop_stream' });
     this.stopCurrentAudio();
     this.hideWaitOverlay();
     this.isProcessing = false;
