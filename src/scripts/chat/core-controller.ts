@@ -555,6 +555,7 @@ export class CoreController {
 
   protected stopStreamingSTT() {
     this.audioManager.stopStreaming();
+    // stop_stream 不要: 音声チャンク送信を止めればバックエンドが自動的にSTT完了を検知
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
@@ -693,18 +694,6 @@ export class CoreController {
         } catch (_e) {}
       }
       if (firstAckPromise) await firstAckPromise;
-
-      const cleanText = this.removeFillers(message);
-      const fallbackResponse = this.generateFallbackResponse(cleanText);
-
-      if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(fallbackResponse, false, false, isTextInput);
-      this.addMessage('assistant', fallbackResponse);
-
-      setTimeout(async () => {
-        const additionalResponse = this.t('additionalResponse');
-        if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(additionalResponse, false, false, isTextInput);
-        this.addMessage('assistant', additionalResponse);
-      }, 3000);
     }
 
     this.isFromVoiceInput = false;
@@ -712,7 +701,7 @@ export class CoreController {
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
     this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 4000);
 
-    // ★ WebSocket経由でテキスト送信（REST POST → WS）
+    // ★ WebSocket経由でテキスト送信（バックエンド仕様準拠）
     this.wsSend({ type: 'text', data: message });
     this.els.userInput.blur();
     // レスポンスは handleWsMessage() で処理

@@ -258,7 +258,7 @@ export class AudioManager {
       // ★STEP2: onmessageハンドラー設定
       this.audioWorkletNode.port.onmessage = (event) => {
         const { audioChunk } = event.data;
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !this.canSendAudio) return;
 
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
@@ -270,10 +270,10 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.globalAudioContext.destination);
 
-      // ★WS接続済み = 送信可能（start_stream/stream_ready不要）
+      // ★STEP4: 送信許可（WS接続済み＝音声送信可能、start_stream不要）
       this.canSendAudio = true;
-      
-      this.recordingTimer = window.setTimeout(() => { 
+
+      this.recordingTimer = window.setTimeout(() => {
         this.stopStreaming_iOS();
         onStopCallback();
       }, this.MAX_RECORDING_TIME);
@@ -424,7 +424,7 @@ export class AudioManager {
       // ★STEP2: onmessageハンドラー設定
       this.audioWorkletNode.port.onmessage = (event) => {
         const { audioChunk } = event.data;
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !this.canSendAudio) return;
 
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
@@ -436,7 +436,7 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.audioContext!.destination);
 
-      // ★WS接続済み = 送信可能（start_stream/stream_ready不要）
+      // ★STEP4: 送信許可（WS接続済み＝音声送信可能、start_stream不要）
       this.canSendAudio = true;
 
       // VAD設定
