@@ -156,13 +156,9 @@ export class CoreController {
   }
 
   protected bindEvents() {
-    this.els.sendBtn?.addEventListener('click', () => {
-      this.enableAudioPlayback(); // ★ ボタンクリック = ユーザーインタラクション → 音声有効化
-      this.sendMessage();
-    });
-
+    this.els.sendBtn?.addEventListener('click', () => this.sendMessage());
+    
     this.els.micBtn?.addEventListener('click', () => {
-      this.enableAudioPlayback(); // ★ ボタンクリック = ユーザーインタラクション → 音声有効化
       this.toggleRecording();
     });
 
@@ -171,10 +167,7 @@ export class CoreController {
     this.els.stopBtn?.addEventListener('click', () => this.stopAllActivities());
     
     this.els.userInput?.addEventListener('keypress', (e: KeyboardEvent) => {
-      if (e.key === 'Enter') {
-        this.enableAudioPlayback(); // ★ Enterキー = ユーザーインタラクション → 音声有効化
-        this.sendMessage();
-      }
+      if (e.key === 'Enter') this.sendMessage();
     });
     
     this.els.languageSelect?.addEventListener('change', () => {
