@@ -7,9 +7,9 @@ import { AudioManager } from './audio-manager';
 export class ConciergeController extends CoreController {
   // Audio2Expression はバックエンドTTSエンドポイント経由で統合済み
   private pendingAckPromise: Promise<void> | null = null;
-  // audio + expression 同期再生用バッファ
+  // B5: audio + expression 同期再生用バッファ
   private pendingLiveAudio: string | null = null;
-  private pendingExpressionData: any = null;
+  private pendingExpression: any = null;
   private expressionWaitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(container: HTMLElement, apiBase: string) {
@@ -150,12 +150,12 @@ export class ConciergeController extends CoreController {
   protected handleWsMessage(msg: any) {
     switch (msg.type) {
       case 'audio':
-        // AI音声（PCM 24kHz）— expression と同期再生するためバッファリング
+        // B5: AI音声（PCM 24kHz）— expressionと同期再生するためバッファリング
         this.isAISpeaking = true;
         if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
         this.pendingLiveAudio = msg.data;
         this._tryStartSyncedPlayback();
-        // expression が来ない場合のフォールバック（200ms待って音声のみ再生）
+        // expressionが来ない場合のフォールバック（200ms待ち）
         this.expressionWaitTimer = setTimeout(() => {
           if (this.pendingLiveAudio) {
             this.playPcmAudioWithAvatar(this.pendingLiveAudio);
@@ -164,8 +164,8 @@ export class ConciergeController extends CoreController {
         }, 200);
         break;
       case 'expression':
-        // アバター表情データ — audio と同期再生するためバッファリング
-        this.pendingExpressionData = msg.data;
+        // B5: アバター表情データ — audioと同期再生するためバッファリング
+        this.pendingExpression = msg.data;
         if (this.expressionWaitTimer) {
           clearTimeout(this.expressionWaitTimer);
           this.expressionWaitTimer = null;
@@ -173,7 +173,7 @@ export class ConciergeController extends CoreController {
         this._tryStartSyncedPlayback();
         break;
       case 'rest_audio':
-        // TTS音声（MP3）with アバターアニメーション（expression を伴わない）
+        // TTS音声（MP3）with アバターアニメーション（expressionを伴わない）
         this.isAISpeaking = true;
         if (this.isRecording) this.stopStreamingSTT();
         if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
@@ -202,34 +202,45 @@ export class ConciergeController extends CoreController {
           this.stopAvatarAnimation();
         }
         break;
+      case 'shop_cards':
+        // 親クラスでカード表示 + テキスト表示
+        super.handleWsMessage(msg);
+        // アバター側: 店舗紹介モードに遷移
+        if (this.els.avatarContainer) this.els.avatarContainer.classList.add('presenting');
+        break;
       case 'interrupted':
-        // barge-in: 再生停止 + アバター停止 + バッファクリア
+        // barge-in: 再生停止 + アバター停止 + 表情リセット
         this.stopCurrentAudio();
         this.isAISpeaking = false;
         this.stopAvatarAnimation();
+        // 表情を中立にリセット
+        if ((window as any).lamAvatarController?.clearFrameBuffer) {
+          (window as any).lamAvatarController.clearFrameBuffer();
+        }
+        // ペンディングデータもクリア
         this.pendingLiveAudio = null;
-        this.pendingExpressionData = null;
+        this.pendingExpression = null;
         if (this.expressionWaitTimer) {
           clearTimeout(this.expressionWaitTimer);
           this.expressionWaitTimer = null;
         }
         break;
       default:
-        // transcription, shop_cards, error, reconnecting, reconnected は親クラスで処理
+        // transcription, error, reconnecting, reconnected は親クラスで処理
         super.handleWsMessage(msg);
         break;
     }
   }
 
-  // audio + expression が両方揃ったら同時再生開始
+  // B5: audio + expression が両方揃ったら同時再生開始
   private _tryStartSyncedPlayback() {
-    if (this.pendingLiveAudio && this.pendingExpressionData) {
+    if (this.pendingLiveAudio && this.pendingExpression) {
       // 表情フレームをアバターにキューイング（音声と同時スタートで自動同期）
-      this.applyExpressionFromTts(this.pendingExpressionData);
+      this.applyExpressionFromTts(this.pendingExpression);
       // 音声再生開始
       this.playPcmAudioWithAvatar(this.pendingLiveAudio);
       this.pendingLiveAudio = null;
-      this.pendingExpressionData = null;
+      this.pendingExpression = null;
     }
   }
 
@@ -577,11 +588,11 @@ export class ConciergeController extends CoreController {
 
     this.isFromVoiceInput = false;
 
-    // ✅ 待機アニメーションは6.5秒後に表示(LLM送信直前にタイマースタート)
+    // ✅ 待機アニメーションは6.5秒後に表示
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
     this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 6500);
 
-    // ★ WebSocket経由でテキスト送信（バックエンド仕様準拠）
+    // ★ WebSocket経由でテキスト送信（REST不要）
     this.wsSend({ type: 'text', data: message });
     this.els.userInput.blur();
     // レスポンスは handleWsMessage() で処理（transcription, audio, expression, shop_cards, rest_audio）

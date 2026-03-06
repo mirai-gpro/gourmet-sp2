@@ -270,7 +270,7 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.globalAudioContext.destination);
 
-      // ★STEP4: 送信許可（WS接続済み＝音声送信可能、start_stream不要）
+      // WS接続済み＝音声送信可能（start_stream不要）
       this.canSendAudio = true;
 
       this.recordingTimer = window.setTimeout(() => {
@@ -436,7 +436,7 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.audioContext!.destination);
 
-      // ★STEP4: 送信許可（WS接続済み＝音声送信可能、start_stream不要）
+      // WS接続済み＝音声送信可能（start_stream不要）
       this.canSendAudio = true;
 
       // VAD設定

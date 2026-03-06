@@ -276,10 +276,14 @@ export class CoreController {
             this.currentAISpeech = "";
           }
         } else if (msg.role === 'ai') {
-          if (!msg.is_partial) {
-            this.hideWaitOverlay();
+          this.hideWaitOverlay();
+          if (msg.is_partial) {
+            // ストリーミング表示: 部分テキストを追記
+            this.updateStreamingMessage('assistant', msg.text);
+          } else {
+            // 確定: バッファクリア → 確定テキストに置換
+            this.finalizeStreamingMessage('assistant', msg.text);
             this.currentAISpeech = msg.text;
-            this.addMessage('assistant', msg.text);
             this.resetInputState();
           }
         }
@@ -345,9 +349,11 @@ export class CoreController {
         break;
       case 'reconnecting':
         console.log('[WS] Reconnecting:', msg.reason);
+        this.showReconnectingUI();
         break;
       case 'reconnected':
         console.log('[WS] Reconnected, session count:', msg.session_count);
+        this.hideReconnectingUI();
         break;
     }
   }
@@ -357,6 +363,46 @@ export class CoreController {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
     }
+  }
+
+  // ストリーミング中のメッセージを更新（末尾の吹き出しに追記）
+  protected updateStreamingMessage(role: string, partialText: string) {
+    const messages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.classList.contains('streaming')) {
+      const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
+      if (content) content.textContent = partialText;
+    } else {
+      this.addMessage(role, partialText);
+      const newMessages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+      const newMsg = newMessages[newMessages.length - 1];
+      if (newMsg) newMsg.classList.add('streaming');
+    }
+  }
+
+  // ストリーミング完了 → 確定テキストに置換
+  protected finalizeStreamingMessage(role: string, finalText: string) {
+    const messages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.classList.contains('streaming')) {
+      const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
+      if (content) content.textContent = finalText;
+      lastMsg.classList.remove('streaming');
+    } else {
+      this.addMessage(role, finalText);
+    }
+  }
+
+  // 再接続中UI表示
+  protected showReconnectingUI() {
+    this.els.voiceStatus.innerHTML = this.t('reconnecting') || '接続中...';
+    this.els.voiceStatus.className = 'voice-status reconnecting';
+  }
+
+  // 再接続完了UI復帰
+  protected hideReconnectingUI() {
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+    this.els.voiceStatus.className = 'voice-status stopped';
   }
 
   // ★ PCM 24kHz音声をWAV形式で再生
