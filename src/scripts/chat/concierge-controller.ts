@@ -4,8 +4,6 @@
 import { CoreController } from './core-controller';
 import { AudioManager } from './audio-manager';
 
-declare const io: any;
-
 export class ConciergeController extends CoreController {
   // Audio2Expression はバックエンドTTSエンドポイント経由で統合済み
   private pendingAckPromise: Promise<void> | null = null;
@@ -70,6 +68,12 @@ export class ConciergeController extends CoreController {
         } catch (e) {}
       }
 
+      // ★ 既存WebSocket接続を閉じる
+      if (this.ws) {
+        try { this.ws.close(); } catch (_e) {}
+        this.ws = null;
+      }
+
       // ★ user_id を取得（親クラスのメソッドを使用）
       const userId = this.getUserId();
 
@@ -85,18 +89,23 @@ export class ConciergeController extends CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
+      // ★ WebSocket接続（session_id取得後）
+      if (data.ws_url) {
+        this.initWebSocket(data.ws_url);
+      }
+
       // リップシンク: バックエンドTTSエンドポイント経由で表情データ取得（追加接続不要）
 
       // ✅ バックエンドからの初回メッセージを使用（長期記憶対応）
       const greetingText = data.initial_message || this.t('initialGreetingConcierge');
       this.addMessage('assistant', greetingText, null, true);
-      
+
       const ackTexts = [
-        this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'), 
+        this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
-      
+
       const ackPromises = ackTexts.map(async (text) => {
         try {
           const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
@@ -115,10 +124,10 @@ export class ConciergeController extends CoreController {
       });
 
       await Promise.all([
-        this.speakTextGCP(greetingText), 
+        this.speakTextGCP(greetingText),
         ...ackPromises
       ]);
-      
+
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
@@ -132,31 +141,115 @@ export class ConciergeController extends CoreController {
   }
 
   // ========================================
-  // 🔧 Socket.IOの初期化をオーバーライド
+  // 🎯 WebSocketメッセージ受信ハンドラをオーバーライド
   // ========================================
-  protected initSocket() {
-    // @ts-ignore
-    const backendUrl = this.container.dataset.backendUrl || window.location.origin;
-    this.socket = io(backendUrl);
-    
-    this.socket.on('connect', () => { });
-    
-    // ✅ コンシェルジュ版のhandleStreamingSTTCompleteを呼ぶように再登録
-    this.socket.on('transcript', (data: any) => {
-      const { text, is_final } = data;
-      if (this.isAISpeaking) return;
-      if (is_final) {
-        this.handleStreamingSTTComplete(text); // ← オーバーライド版が呼ばれる
-        this.currentAISpeech = "";
-      } else {
-        this.els.userInput.value = text;
-      }
-    });
+  protected handleWsMessage(msg: any) {
+    switch (msg.type) {
+      case 'expression':
+        // アバター表情データ適用
+        this.applyExpressionFromTts(msg.data);
+        break;
+      case 'audio':
+        // AI音声（PCM 24kHz）with アバターアニメーション
+        this.isAISpeaking = true;
+        if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
+        this.playPcmAudioWithAvatar(msg.data);
+        break;
+      case 'rest_audio':
+        // TTS音声（MP3）with アバターアニメーション
+        this.isAISpeaking = true;
+        if (this.isRecording) this.stopStreamingSTT();
+        if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
+        if (msg.text) this.lastAISpeech = this.normalizeText(msg.text);
+        this.stopCurrentAudio();
+        this.ttsPlayer.src = `data:audio/mp3;base64,${msg.data}`;
+        this.ttsPlayer.onended = () => {
+          this.isAISpeaking = false;
+          this.stopAvatarAnimation();
+          this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+          this.els.voiceStatus.className = 'voice-status stopped';
+        };
+        this.ttsPlayer.onerror = () => {
+          this.isAISpeaking = false;
+          this.stopAvatarAnimation();
+        };
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+        this.els.voiceStatus.className = 'voice-status speaking';
+        if (this.isUserInteracted) {
+          this.ttsPlayer.play().catch(() => {
+            this.isAISpeaking = false;
+            this.stopAvatarAnimation();
+          });
+        } else {
+          this.isAISpeaking = false;
+          this.stopAvatarAnimation();
+        }
+        break;
+      case 'interrupted':
+        // barge-in: 再生停止 + アバター停止
+        this.stopCurrentAudio();
+        this.isAISpeaking = false;
+        this.stopAvatarAnimation();
+        break;
+      default:
+        // transcription, shop_cards, error, reconnecting, reconnected は親クラスで処理
+        super.handleWsMessage(msg);
+        break;
+    }
+  }
 
-    this.socket.on('error', (data: any) => {
-      this.addMessage('system', `${this.t('sttError')} ${data.message}`);
-      if (this.isRecording) this.stopStreamingSTT();
-    });
+  // ★ PCM音声再生（アバターアニメーション付き）
+  private playPcmAudioWithAvatar(base64Data: string) {
+    const pcmBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+
+    // WAVヘッダー生成（PCM 16-bit mono 24kHz）
+    const header = new ArrayBuffer(44);
+    const v = new DataView(header);
+    const sr = 24000, ch = 1, bps = 16;
+    v.setUint32(0, 0x52494646, false);
+    v.setUint32(4, 36 + pcmBytes.length, true);
+    v.setUint32(8, 0x57415645, false);
+    v.setUint32(12, 0x666D7420, false);
+    v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true);
+    v.setUint16(22, ch, true);
+    v.setUint32(24, sr, true);
+    v.setUint32(28, sr * ch * bps / 8, true);
+    v.setUint16(32, ch * bps / 8, true);
+    v.setUint16(34, bps, true);
+    v.setUint32(36, 0x64617461, false);
+    v.setUint32(40, pcmBytes.length, true);
+
+    const wav = new Blob([header, pcmBytes], { type: 'audio/wav' });
+    const url = URL.createObjectURL(wav);
+
+    this.stopCurrentAudio();
+    this.ttsPlayer.src = url;
+    this.ttsPlayer.onended = () => {
+      URL.revokeObjectURL(url);
+      this.isAISpeaking = false;
+      this.stopAvatarAnimation();
+      this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+      this.els.voiceStatus.className = 'voice-status stopped';
+    };
+    this.ttsPlayer.onerror = () => {
+      URL.revokeObjectURL(url);
+      this.isAISpeaking = false;
+      this.stopAvatarAnimation();
+    };
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+    this.els.voiceStatus.className = 'voice-status speaking';
+    if (this.isUserInteracted) {
+      this.ttsPlayer.play().catch(() => {
+        this.isAISpeaking = false;
+        this.stopAvatarAnimation();
+        URL.revokeObjectURL(url);
+      });
+    } else {
+      this.isAISpeaking = false;
+      this.stopAvatarAnimation();
+      URL.revokeObjectURL(url);
+    }
   }
 
   // コンシェルジュモード固有: アバターアニメーション制御 + 公式リップシンク
@@ -316,176 +409,15 @@ export class ConciergeController extends CoreController {
   }
 
   // ========================================
-  // 🎯 並行処理フロー: 応答を分割してTTS処理
-  // ========================================
-
-  /**
-   * センテンス単位でテキストを分割
-   * 日本語: 。で分割
-   * 英語・韓国語: . で分割
-   * 中国語: 。で分割
-   */
-  private splitIntoSentences(text: string, language: string): string[] {
-    let separator: RegExp;
-
-    if (language === 'ja' || language === 'zh') {
-      // 日本語・中国語: 。で分割
-      separator = /。/;
-    } else {
-      // 英語・韓国語: . で分割
-      separator = /\.\s+/;
-    }
-
-    const sentences = text.split(separator).filter(s => s.trim().length > 0);
-
-    // 分割したセンテンスに句点を戻す
-    return sentences.map((s, idx) => {
-      if (idx < sentences.length - 1 || text.endsWith('。') || text.endsWith('. ')) {
-        return language === 'ja' || language === 'zh' ? s + '。' : s + '. ';
-      }
-      return s;
-    });
-  }
-
-  /**
-   * 応答を分割して並行処理でTTS生成・再生
-   * チャットモードのお店紹介フローを参考に実装
-   */
-  private async speakResponseInChunks(response: string, isTextInput: boolean = false) {
-    // テキスト入力またはTTS無効の場合は従来通り
-    if (isTextInput || !this.isTTSEnabled) {
-      return this.speakTextGCP(response, true, false, isTextInput);
-    }
-
-    try {
-      // ★ ack再生中ならttsPlayer解放を待つ（並行処理の同期ポイント）
-      if (this.pendingAckPromise) {
-        await this.pendingAckPromise;
-        this.pendingAckPromise = null;
-      }
-      this.stopCurrentAudio(); // ttsPlayer確実解放
-
-      this.isAISpeaking = true;
-      if (this.isRecording) {
-        this.stopStreamingSTT();
-      }
-
-      // センテンス分割
-      const sentences = this.splitIntoSentences(response, this.currentLanguage);
-
-      // 1センテンスしかない場合は従来通り
-      if (sentences.length <= 1) {
-        await this.speakTextGCP(response, true, false, isTextInput);
-        this.isAISpeaking = false;
-        return;
-      }
-
-      // 最初のセンテンスと残りのセンテンスに分割
-      const firstSentence = sentences[0];
-      const remainingSentences = sentences.slice(1).join('');
-
-      const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
-
-      // ★並行処理: TTS生成と表情生成を同時に実行して遅延を最小化
-      if (this.isUserInteracted) {
-        const cleanFirst = this.stripMarkdown(firstSentence);
-        const cleanRemaining = remainingSentences.trim().length > 0
-          ? this.stripMarkdown(remainingSentences) : null;
-
-        // ★ 4つのAPIコールを可能な限り並行で開始
-        // 1. 最初のセンテンスTTS
-        const firstTtsPromise = fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: cleanFirst, language_code: langConfig.tts,
-            voice_name: langConfig.voice, session_id: this.sessionId
-          })
-        }).then(r => r.json());
-
-        // 2. 残りのセンテンスTTS（あれば）
-        const remainingTtsPromise = cleanRemaining
-          ? fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                text: cleanRemaining, language_code: langConfig.tts,
-                voice_name: langConfig.voice, session_id: this.sessionId
-              })
-            }).then(r => r.json())
-          : null;
-
-        // ★ 最初のTTSが返ったら即再生（Expression同梱済み）
-        const firstTtsResult = await firstTtsPromise;
-        if (firstTtsResult.success && firstTtsResult.audio) {
-          // ★ TTS応答に同梱されたExpressionを即バッファ投入（遅延ゼロ）
-          if (firstTtsResult.expression) this.applyExpressionFromTts(firstTtsResult.expression);
-
-          this.lastAISpeech = this.normalizeText(cleanFirst);
-          this.stopCurrentAudio();
-          this.ttsPlayer.src = `data:audio/mp3;base64,${firstTtsResult.audio}`;
-
-          // 残りのTTS結果を先に取得（TTS応答にExpression同梱済み）
-          let remainingTtsResult: any = null;
-          if (remainingTtsPromise) {
-            remainingTtsResult = await remainingTtsPromise;
-          }
-
-          // 最初のセンテンス再生
-          await new Promise<void>((resolve) => {
-            this.ttsPlayer.onended = () => {
-              this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-              this.els.voiceStatus.className = 'voice-status stopped';
-              resolve();
-            };
-            this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-            this.els.voiceStatus.className = 'voice-status speaking';
-            this.ttsPlayer.play();
-          });
-
-          // ★ 残りのセンテンスを続けて再生（Expression同梱済み）
-          if (remainingTtsResult?.success && remainingTtsResult?.audio) {
-            this.lastAISpeech = this.normalizeText(cleanRemaining || '');
-
-            // ★ TTS応答に同梱されたExpressionを即バッファ投入
-            if (remainingTtsResult.expression) this.applyExpressionFromTts(remainingTtsResult.expression);
-
-            this.stopCurrentAudio();
-            this.ttsPlayer.src = `data:audio/mp3;base64,${remainingTtsResult.audio}`;
-
-            await new Promise<void>((resolve) => {
-              this.ttsPlayer.onended = () => {
-                this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-                this.els.voiceStatus.className = 'voice-status stopped';
-                resolve();
-              };
-              this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-              this.els.voiceStatus.className = 'voice-status speaking';
-              this.ttsPlayer.play();
-            });
-          }
-        }
-      }
-
-      this.isAISpeaking = false;
-    } catch (error) {
-      console.error('[TTS並行処理エラー]', error);
-      this.isAISpeaking = false;
-      // エラー時はフォールバック
-      await this.speakTextGCP(response, true, false, isTextInput);
-    }
-  }
-
-  // ========================================
   // 🎯 コンシェルジュモード専用: 音声入力完了時の即答処理
   // ========================================
   protected async handleStreamingSTTComplete(transcript: string) {
     this.stopStreamingSTT();
-    
+
     if ('mediaSession' in navigator) {
       try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
     }
-    
+
     this.els.voiceStatus.innerHTML = this.t('voiceStatusComplete');
     this.els.voiceStatus.className = 'voice-status';
 
@@ -500,7 +432,7 @@ export class ConciergeController extends CoreController {
 
     this.els.userInput.value = transcript;
     this.addMessage('user', transcript);
-    
+
     // 短すぎる入力チェック
     const textLength = transcript.trim().replace(/\s+/g, '').length;
     if (textLength < 2) {
@@ -508,8 +440,8 @@ export class ConciergeController extends CoreController {
         this.addMessage('assistant', msg);
         if (this.isTTSEnabled && this.isUserInteracted) {
           await this.speakTextGCP(msg, true);
-        } else { 
-          await new Promise(r => setTimeout(r, 2000)); 
+        } else {
+          await new Promise(r => setTimeout(r, 2000));
         }
         this.els.userInput.value = '';
         this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
@@ -560,13 +492,12 @@ export class ConciergeController extends CoreController {
     }
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
-    
-    const currentSessionId = this.sessionId;
+
     const isTextInput = !this.isFromVoiceInput;
-    
-    this.isProcessing = true; 
+
+    this.isProcessing = true;
     this.els.sendBtn.disabled = true;
-    this.els.micBtn.disabled = true; 
+    this.els.micBtn.disabled = true;
     this.els.userInput.disabled = true;
 
     // ✅ テキスト入力時も「はい」だけに簡略化
@@ -580,14 +511,14 @@ export class ConciergeController extends CoreController {
            this.resetInputState();
            return;
       }
-      
+
       this.els.userInput.value = '';
-      
+
       // ✅ 修正: 即答を「はい」だけに
       const ackText = this.t('ackYes');
       this.currentAISpeech = ackText;
       this.addMessage('assistant', ackText);
-      
+
       if (this.isTTSEnabled && !isTextInput) {
         try {
           const preGeneratedAudio = this.preGeneratedAcks.get(ackText);
@@ -598,235 +529,27 @@ export class ConciergeController extends CoreController {
               this.ttsPlayer.onended = () => resolve();
               this.ttsPlayer.play().catch(_e => resolve());
             });
-          } else { 
-            firstAckPromise = this.speakTextGCP(ackText, false); 
+          } else {
+            firstAckPromise = this.speakTextGCP(ackText, false);
           }
         } catch (_e) {}
-      }   
+      }
       if (firstAckPromise) await firstAckPromise;
-      
+
       // ✅ 修正: オウム返しパターンを削除
       // (generateFallbackResponse, additionalResponse の呼び出しを削除)
     }
 
     this.isFromVoiceInput = false;
-    
+
     // ✅ 待機アニメーションは6.5秒後に表示(LLM送信直前にタイマースタート)
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
-    let responseReceived = false;
-    
-    // タイマーセットをtry直前に移動(即答処理の後)
-    this.waitOverlayTimer = window.setTimeout(() => { 
-      if (!responseReceived) {
-        this.showWaitOverlay(); 
-      }
-    }, 6500);
+    this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 6500);
 
-    try {
-      const response = await fetch(`${this.apiBase}/api/v2/rest/chat`, { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ 
-          session_id: currentSessionId, 
-          message: message, 
-          stage: this.currentStage, 
-          language: this.currentLanguage,
-          mode: this.currentMode
-        }) 
-      });
-      const data = await response.json();
-      
-      // ✅ レスポンス到着フラグを立てる
-      responseReceived = true;
-      
-      if (this.sessionId !== currentSessionId) return;
-      
-      // ✅ タイマーをクリアしてアニメーションを非表示
-      if (this.waitOverlayTimer) {
-        clearTimeout(this.waitOverlayTimer);
-        this.waitOverlayTimer = null;
-      }
-      this.hideWaitOverlay();
-      this.currentAISpeech = data.response;
-      this.addMessage('assistant', data.response, data.summary);
-      
-      if (!isTextInput && this.isTTSEnabled) {
-        this.stopCurrentAudio();
-      }
-      
-      if (data.shops && data.shops.length > 0) {
-        this.currentShops = data.shops;
-        this.els.reservationBtn.classList.add('visible');
-        this.els.userInput.value = '';
-        document.dispatchEvent(new CustomEvent('displayShops', { 
-          detail: { shops: data.shops, language: this.currentLanguage } 
-        }));
-        
-        const section = document.getElementById('shopListSection');
-        if (section) section.classList.add('has-shops');
-        if (window.innerWidth < 1024) {
-          setTimeout(() => {
-            const shopSection = document.getElementById('shopListSection');
-            if (shopSection) shopSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-           }, 300);
-        }
-        
-        (async () => {
-          try {
-            // ★ ack再生中ならttsPlayer解放を待つ（並行処理の同期ポイント）
-            if (this.pendingAckPromise) {
-              await this.pendingAckPromise;
-              this.pendingAckPromise = null;
-            }
-            this.stopCurrentAudio(); // ttsPlayer確実解放
-
-            this.isAISpeaking = true;
-            if (this.isRecording) { this.stopStreamingSTT(); }
-
-            await this.speakTextGCP(this.t('ttsIntro'), true, false, isTextInput);
-            
-            const lines = data.response.split('\n\n');
-            let introText = ""; 
-            let shopLines = lines;
-            if (lines[0].includes('ご希望に合うお店') && lines[0].includes('ご紹介します')) { 
-              introText = lines[0]; 
-              shopLines = lines.slice(1); 
-            }
-            
-            let introPart2Promise: Promise<void> | null = null;
-            if (introText && this.isTTSEnabled && this.isUserInteracted && !isTextInput) {
-                const preGeneratedIntro = this.preGeneratedAcks.get(introText);
-              if (preGeneratedIntro) {
-                introPart2Promise = new Promise<void>((resolve) => {
-                  this.lastAISpeech = this.normalizeText(introText);
-                  this.ttsPlayer.src = `data:audio/mp3;base64,${preGeneratedIntro}`;
-                  this.ttsPlayer.onended = () => resolve();
-                  this.ttsPlayer.play();
-                });
-              } else { 
-                introPart2Promise = this.speakTextGCP(introText, false, false, isTextInput); 
-              }
-            }
-
-            let firstShopTtsPromise: Promise<any> | null = null;
-            let remainingShopTtsPromise: Promise<any> | null = null;
-            const shopLangConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
-
-            if (shopLines.length > 0 && this.isTTSEnabled && this.isUserInteracted && !isTextInput) {
-              const firstShop = shopLines[0];
-              const restShops = shopLines.slice(1).join('\n\n');
-
-              // ★ 1行目先行: 最初のショップと残りのTTSを並行開始
-              firstShopTtsPromise = fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  text: this.stripMarkdown(firstShop), language_code: shopLangConfig.tts,
-                  voice_name: shopLangConfig.voice, session_id: this.sessionId
-                })
-              }).then(r => r.json());
-
-              if (restShops) {
-                remainingShopTtsPromise = fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    text: this.stripMarkdown(restShops), language_code: shopLangConfig.tts,
-                    voice_name: shopLangConfig.voice, session_id: this.sessionId
-                  })
-                }).then(r => r.json());
-              }
-            }
-
-            if (introPart2Promise) await introPart2Promise;
-
-            if (firstShopTtsPromise) {
-              const firstResult = await firstShopTtsPromise;
-              if (firstResult?.success && firstResult?.audio) {
-                const firstShopText = this.stripMarkdown(shopLines[0]);
-                this.lastAISpeech = this.normalizeText(firstShopText);
-
-                // ★ TTS応答に同梱されたExpressionを即バッファ投入
-                if (firstResult.expression) this.applyExpressionFromTts(firstResult.expression);
-
-                if (!isTextInput && this.isTTSEnabled) {
-                  this.stopCurrentAudio();
-                }
-
-                this.ttsPlayer.src = `data:audio/mp3;base64,${firstResult.audio}`;
-
-                // 残りのTTS結果を先に取得（Expression同梱済み）
-                let remainingResult: any = null;
-                if (remainingShopTtsPromise) {
-                  remainingResult = await remainingShopTtsPromise;
-                }
-
-                await new Promise<void>((resolve) => {
-                  this.ttsPlayer.onended = () => {
-                    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-                    this.els.voiceStatus.className = 'voice-status stopped';
-                    resolve();
-                  };
-                  this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-                  this.els.voiceStatus.className = 'voice-status speaking';
-                  this.ttsPlayer.play();
-                });
-
-                if (remainingResult?.success && remainingResult?.audio) {
-                    const restShopsText = this.stripMarkdown(shopLines.slice(1).join('\n\n'));
-                    this.lastAISpeech = this.normalizeText(restShopsText);
-
-                    // ★ TTS応答に同梱されたExpressionを即バッファ投入
-                    if (remainingResult.expression) this.applyExpressionFromTts(remainingResult.expression);
-
-                    if (!isTextInput && this.isTTSEnabled) {
-                      this.stopCurrentAudio();
-                    }
-
-                    this.ttsPlayer.src = `data:audio/mp3;base64,${remainingResult.audio}`;
-                    await new Promise<void>((resolve) => {
-                      this.ttsPlayer.onended = () => {
-                        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-                        this.els.voiceStatus.className = 'voice-status stopped';
-                        resolve();
-                      };
-                      this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-                      this.els.voiceStatus.className = 'voice-status speaking';
-                      this.ttsPlayer.play();
-                    });
-                }
-              }
-            }
-            this.isAISpeaking = false;
-          } catch (_e) { this.isAISpeaking = false; }
-        })();
-      } else {
-        if (data.response) {
-          const extractedShops = this.extractShopsFromResponse(data.response);
-          if (extractedShops.length > 0) {
-            this.currentShops = extractedShops;
-            this.els.reservationBtn.classList.add('visible');
-            document.dispatchEvent(new CustomEvent('displayShops', {
-              detail: { shops: extractedShops, language: this.currentLanguage }
-            }));
-            const section = document.getElementById('shopListSection');
-            if (section) section.classList.add('has-shops');
-            // ★並行処理フローを適用
-            this.speakResponseInChunks(data.response, isTextInput);
-          } else {
-            // ★並行処理フローを適用
-            this.speakResponseInChunks(data.response, isTextInput);
-          }
-        }
-      }
-    } catch (error) { 
-      console.error('送信エラー:', error);
-      this.hideWaitOverlay(); 
-      this.showError('メッセージの送信に失敗しました。'); 
-    } finally { 
-      this.resetInputState();
-      this.els.userInput.blur();
-    }
+    // ★ WebSocket経由でテキスト送信（REST POST → WS）
+    this.wsSend({ type: 'text', data: message });
+    this.els.userInput.blur();
+    // レスポンスは handleWsMessage() で処理
   }
 
 }

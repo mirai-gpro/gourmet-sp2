@@ -14,8 +14,8 @@
       "destination": "https://support-base-hhasiuut7q-uc.a.run.app/api/stt/:path*"
     },
     {
-      "source": "/socket.io/:path*",
-      "destination": "https://support-base-hhasiuut7q-uc.a.run.app/socket.io/:path*"
+      "source": "/api/v2/live/:path*",
+      "destination": "https://support-base-hhasiuut7q-uc.a.run.app/api/v2/live/:path*"
     }
   ]
 }

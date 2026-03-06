@@ -109,15 +109,15 @@ export class AudioManager {
   }
 
   public async startStreaming(
-    socket: any, 
-    languageCode: string, 
+    ws: WebSocket,
+    languageCode: string,
     onStopCallback: () => void,
-    onSpeechStart?: () => void 
+    onSpeechStart?: () => void
   ) {
     if (this.isIOS) {
-      await this.startStreaming_iOS(socket, languageCode, onStopCallback);
+      await this.startStreaming_iOS(ws, languageCode, onStopCallback);
     } else {
-      await this.startStreaming_Default(socket, languageCode, onStopCallback, onSpeechStart);
+      await this.startStreaming_Default(ws, languageCode, onStopCallback, onSpeechStart);
     }
   }
 
@@ -138,7 +138,7 @@ export class AudioManager {
   }
 
   // --- iOS用実装 ---
-  private async startStreaming_iOS(socket: any, languageCode: string, onStopCallback: () => void) {
+  private async startStreaming_iOS(ws: WebSocket, languageCode: string, onStopCallback: () => void) {
     try {
       // ★初期化
       this.canSendAudio = false;
@@ -255,69 +255,23 @@ export class AudioManager {
       this.audioWorkletNode = new AudioWorkletNode(this.globalAudioContext, processorName);
       await new Promise(resolve => setTimeout(resolve, 50));
       
-      // ★STEP2: onmessageハンドラー設定(バッファリング付き)
+      // ★STEP2: onmessageハンドラー設定
       this.audioWorkletNode.port.onmessage = (event) => {
         const { audioChunk } = event.data;
-        if (!socket || !socket.connected) return;
-        
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
         try {
           const base64 = fastArrayBufferToBase64(audioChunk.buffer);
-          
-          // ★送信許可が出ていない場合はバッファに保存
-          if (!this.canSendAudio) {
-            this.audioBuffer.push({ chunk: audioChunk.buffer, sampleRate: 16000 });
-            // バッファが大きくなりすぎないよう制限(最大3秒分 = 48チャンク)
-            if (this.audioBuffer.length > 48) {
-              this.audioBuffer.shift();
-            }
-            return;
-          }
-          
-          // ★送信許可が出たら即座に送信
-          socket.emit('audio_chunk', { chunk: base64, sample_rate: 16000 });
+          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
         } catch (e) { }
       };
-      
+
       // ★STEP3: 音声グラフ接続
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.globalAudioContext.destination);
-      
-      // ★STEP4: Socket通知(サーバー準備開始)
-      if (socket && socket.connected) {
-        socket.emit('stop_stream');
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      
-      // ★STEP5: start_stream送信して、サーバー準備完了を待つ
-      const streamReadyPromise = new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => resolve(), 500);
-        socket.once('stream_ready', () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
-      
-      socket.emit('start_stream', { 
-        language_code: languageCode,
-        sample_rate: 16000
-      });
-      
-      // ★STEP6: サーバー準備完了を待機(最大500ms)
-      await streamReadyPromise;
-      
-      // ★STEP7: 送信許可フラグを立てる
+
+      // ★WS接続済み = 送信可能（start_stream/stream_ready不要）
       this.canSendAudio = true;
-      
-      // ★STEP8: バッファに溜まった音声を一気に送信
-      if (this.audioBuffer.length > 0) {
-        for (const buffered of this.audioBuffer) {
-          try {
-            const base64 = fastArrayBufferToBase64(buffered.chunk);
-            socket.emit('audio_chunk', { chunk: base64, sample_rate: buffered.sampleRate });
-          } catch (e) { }
-        }
-        this.audioBuffer = [];
-      }
       
       this.recordingTimer = window.setTimeout(() => { 
         this.stopStreaming_iOS();
@@ -361,8 +315,8 @@ export class AudioManager {
 
   // --- PC / Android用実装(修正版) ---
   private async startStreaming_Default(
-    socket: any, 
-    languageCode: string, 
+    ws: WebSocket,
+    languageCode: string,
     onStopCallback: () => void,
     onSpeechStart?: () => void
   ) {
@@ -467,88 +421,23 @@ export class AudioManager {
       this.audioWorkletNode = new AudioWorkletNode(this.audioContext!, 'audio-processor');
       await new Promise(resolve => setTimeout(resolve, 50));
       
-      // ★STEP2: onmessageハンドラー設定(バッファリング付き)
+      // ★STEP2: onmessageハンドラー設定
       this.audioWorkletNode.port.onmessage = (event) => {
         const { audioChunk } = event.data;
-        if (!socket || !socket.connected) return;
-        
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
         try {
-          // ★送信許可が出ていない場合はバッファに保存
-          if (!this.canSendAudio) {
-            this.audioBuffer.push({ chunk: audioChunk, sampleRate: 16000 });
-            if (this.audioBuffer.length > 48) {
-              this.audioBuffer.shift();
-            }
-            return;
-          }
-          
-          // ★送信許可が出たら即座に送信
-          const blob = new Blob([audioChunk], { type: 'application/octet-stream' });
-          const reader = new FileReader();
-          reader.onload = () => {
-              const result = reader.result as string;
-              const base64 = result.split(',')[1];
-              socket.emit('audio_chunk', { chunk: base64, sample_rate: 16000 });
-          };
-          reader.readAsDataURL(blob);
+          const base64 = fastArrayBufferToBase64(audioChunk.buffer);
+          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
         } catch (e) { }
       };
-      
+
       // ★STEP3: 音声グラフ接続
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.audioContext!.destination);
-      
-      // ★待機: AudioWorkletが音声処理を開始するまで
-      await new Promise(resolve => setTimeout(resolve, 200));
 
-      // ★STEP4: Socket通知(サーバー準備開始)
-      if (socket && socket.connected) {
-        socket.emit('stop_stream');
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      
-      // ★STEP5: start_stream送信して、サーバー準備完了を待つ
-      const streamReadyPromise = new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => resolve(), 700);
-        socket.once('stream_ready', () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
-      
-      socket.emit('start_stream', { 
-        language_code: languageCode,
-        sample_rate: 16000
-      });
-      
-      // ★STEP6: サーバー準備完了を待機(最大700ms)
-      await streamReadyPromise;
-      
-      // ★追加待機: バッファに音声を蓄積
-      await new Promise(resolve => setTimeout(resolve, 200));
-      
-      // ★STEP7: 送信許可フラグを立てる
+      // ★WS接続済み = 送信可能（start_stream/stream_ready不要）
       this.canSendAudio = true;
-      
-      // ★STEP8: バッファに溜まった音声を一気に送信（順序保証）
-      if (this.audioBuffer.length > 0) {
-        for (const buffered of this.audioBuffer) {
-          try {
-            const blob = new Blob([buffered.chunk], { type: 'application/octet-stream' });
-            const base64 = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = reader.result as string;
-                resolve(result.split(',')[1]);
-              };
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-            socket.emit('audio_chunk', { chunk: base64, sample_rate: buffered.sampleRate });
-          } catch (e) { }
-        }
-        this.audioBuffer = [];
-      }
 
       // VAD設定
       this.analyser = this.audioContext!.createAnalyser();
