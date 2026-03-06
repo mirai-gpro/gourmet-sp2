@@ -367,14 +367,14 @@ export class CoreController {
 
   // ストリーミング中のメッセージを更新（末尾の吹き出しに追記）
   protected updateStreamingMessage(role: string, partialText: string) {
-    const messages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+    const messages = this.els.chatArea.querySelectorAll(`.message.${role}`);
     const lastMsg = messages[messages.length - 1];
     if (lastMsg && lastMsg.classList.contains('streaming')) {
       const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
       if (content) content.textContent = partialText;
     } else {
       this.addMessage(role, partialText);
-      const newMessages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+      const newMessages = this.els.chatArea.querySelectorAll(`.message.${role}`);
       const newMsg = newMessages[newMessages.length - 1];
       if (newMsg) newMsg.classList.add('streaming');
     }
@@ -382,7 +382,7 @@ export class CoreController {
 
   // ストリーミング完了 → 確定テキストに置換
   protected finalizeStreamingMessage(role: string, finalText: string) {
-    const messages = this.els.chatMessages.querySelectorAll(`.message.${role}`);
+    const messages = this.els.chatArea.querySelectorAll(`.message.${role}`);
     const lastMsg = messages[messages.length - 1];
     if (lastMsg && lastMsg.classList.contains('streaming')) {
       const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
