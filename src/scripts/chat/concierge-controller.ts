@@ -57,11 +57,6 @@ export class ConciergeController extends CoreController {
           lam.setLiveAudioTimeGetter(() => this.dialogueManager.getAudioPlaybackTime());
           console.log(`[Concierge] Live audio time getter linked with LAMAvatar`);
         }
-        // ★ Live API 振幅フォールバック: expression データなしでもリップシンク
-        if (typeof lam.setLiveAmplitudeGetter === 'function') {
-          lam.setLiveAmplitudeGetter(() => this.dialogueManager.getLiveAmplitude());
-          console.log(`[Concierge] Live amplitude getter linked with LAMAvatar`);
-        }
         linked = true;
         console.log(`[Concierge] TTS player linked with LAMAvatar (attempt #${linkAttempts})`);
         return true;

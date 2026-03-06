@@ -42,11 +42,6 @@ export class LiveAudioIO {
   private isPlaying = false;
   private nextPlayTime = 0;
 
-  // ★ 振幅解析（アバターリップシンクフォールバック用）
-  private _gainNode: GainNode | null = null;
-  private _analyserNode: AnalyserNode | null = null;
-  private _analyserData: Uint8Array | null = null;
-
   // 再生中の currentTime を外部から参照可能にする（アバター同期用）
   private _playbackStartTime = 0;
   private _turnActive = false;  // ターン内で playbackStartTime を1回だけ設定するフラグ
@@ -303,7 +298,7 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
 
       const source = this.playbackContext.createBufferSource();
       source.buffer = buffer;
-      source.connect(this.getPlaybackChain());
+      source.connect(this.playbackContext.destination);
 
       const now = this.playbackContext.currentTime;
       const startAt = Math.max(now, this.nextPlayTime);
@@ -312,40 +307,6 @@ registerProcessor('${processorName}', LiveDownsampleProcessor);
     }
 
     this.isPlaying = false;
-  }
-
-  /**
-   * 再生チェインを取得（GainNode → AnalyserNode → destination）
-   * 振幅解析ノードを挟むことで、expression データなしでも
-   * 音声振幅からリップシンクフォールバックが可能
-   */
-  private getPlaybackChain(): AudioNode {
-    if (!this.playbackContext) throw new Error('No playback context');
-    if (!this._gainNode) {
-      this._gainNode = this.playbackContext.createGain();
-      this._analyserNode = this.playbackContext.createAnalyser();
-      this._analyserNode.fftSize = 256;
-      this._analyserNode.smoothingTimeConstant = 0.3;
-      this._analyserData = new Uint8Array(this._analyserNode.frequencyBinCount);
-      this._gainNode.connect(this._analyserNode);
-      this._analyserNode.connect(this.playbackContext.destination);
-    }
-    return this._gainNode;
-  }
-
-  /**
-   * 現在の音声振幅（RMS, 0〜1）
-   * LAMAvatar がリップシンクフォールバックに使用
-   */
-  get currentAmplitude(): number {
-    if (!this._analyserNode || !this._analyserData) return 0;
-    this._analyserNode.getByteTimeDomainData(this._analyserData);
-    let sum = 0;
-    for (let i = 0; i < this._analyserData.length; i++) {
-      const val = (this._analyserData[i] - 128) / 128;
-      sum += val * val;
-    }
-    return Math.sqrt(sum / this._analyserData.length);
   }
 
   private int16ArrayToBase64(data: Int16Array): string {
