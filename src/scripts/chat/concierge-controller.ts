@@ -156,6 +156,12 @@ export class ConciergeController extends CoreController {
         // B5: AI音声（PCM 24kHz）— expressionと同期再生するためバッファリング
         console.log(`[Concierge] WS audio received: ${msg.data?.length || 0} chars, isUserInteracted=${this.isUserInteracted}`);
         this.isAISpeaking = true;
+        // ★修正: マイクが録音中の場合は停止（半二重: マイクOFF→スピーカーON）
+        if (this.isRecording) {
+          console.log('[Concierge] Stopping mic for audio playback');
+          this.stopStreamingSTT();
+        }
+        this.hideWaitOverlay();
         if (this.els.avatarContainer) this.els.avatarContainer.classList.add('speaking');
         this.pendingLiveAudio = msg.data;
         this._tryStartSyncedPlayback();
@@ -287,11 +293,13 @@ export class ConciergeController extends CoreController {
       this.stopAvatarAnimation();
       this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
       this.els.voiceStatus.className = 'voice-status stopped';
+      this.resetInputState();
     };
     this.ttsPlayer.onerror = () => {
       URL.revokeObjectURL(url);
       this.isAISpeaking = false;
       this.stopAvatarAnimation();
+      this.resetInputState();
     };
     this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
     this.els.voiceStatus.className = 'voice-status speaking';
@@ -378,7 +386,9 @@ export class ConciergeController extends CoreController {
           await this.ttsPlayer.play();
           await playPromise;
         } else {
-          this.showClickPrompt();
+          // ★修正: 挨拶音声を保留して、ユーザー初回操作時に再生
+          console.log('[Concierge] Audio deferred: isUserInteracted=false, saving for later');
+          this._pendingGreetingAudio = `data:audio/mp3;base64,${data.audio}`;
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
@@ -473,8 +483,11 @@ export class ConciergeController extends CoreController {
   }
 
   // ========================================
-  // 🎯 コンシェルジュモード専用: 音声入力完了時の即答処理
+  // 🎯 コンシェルジュモード専用: 音声入力完了時の処理
   // ========================================
+  // ★ Live API修正: 音声は既にGeminiに送信・処理済み
+  // turn_completeでaudio/expressionが自動的に到着するため、テキスト再送信は不要
+  // 再送信するとGeminiが2回処理して二重応答になる
   protected async handleStreamingSTTComplete(transcript: string) {
     this.stopStreamingSTT();
 
@@ -482,67 +495,34 @@ export class ConciergeController extends CoreController {
       try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
     }
 
-    this.els.voiceStatus.innerHTML = this.t('voiceStatusComplete');
-    this.els.voiceStatus.className = 'voice-status';
-
     // オウム返し判定(エコーバック防止)
     const normTranscript = this.normalizeText(transcript);
     if (this.isSemanticEcho(normTranscript, this.lastAISpeech)) {
+        console.log('[Concierge] Echo detected, ignoring transcript');
         this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
         this.els.voiceStatus.className = 'voice-status stopped';
         this.lastAISpeech = '';
         return;
     }
 
-    this.els.userInput.value = transcript;
+    // ユーザー発言を表示
     this.addMessage('user', transcript);
+    this.els.userInput.value = '';
 
-    // 短すぎる入力チェック
-    const textLength = transcript.trim().replace(/\s+/g, '').length;
-    if (textLength < 2) {
-        const msg = this.t('shortMsgWarning');
-        this.addMessage('assistant', msg);
-        if (this.isTTSEnabled && this.isUserInteracted) {
-          await this.speakTextGCP(msg, true);
-        } else {
-          await new Promise(r => setTimeout(r, 2000));
-        }
-        this.els.userInput.value = '';
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        return;
-    }
+    console.log('[Concierge] Voice transcript received (Live API), waiting for audio/expression from turn_complete');
 
-    // ✅ 修正: 即答を「はい」だけに簡略化
-    const ackText = this.t('ackYes'); // 「はい」のみ
-    const preGeneratedAudio = this.preGeneratedAcks.get(ackText);
+    // ★ Live API: テキスト再送信しない
+    // Geminiは音声入力を既に処理済み → turn_completeでaudio+expressionが到着する
+    // handleWsMessage の case 'audio' / case 'expression' で再生される
 
-    // 即答を再生（ttsPlayerで）
-    if (preGeneratedAudio && this.isTTSEnabled && this.isUserInteracted) {
-      this.pendingAckPromise = new Promise<void>((resolve) => {
-        this.lastAISpeech = this.normalizeText(ackText);
-        this.ttsPlayer.src = `data:audio/mp3;base64,${preGeneratedAudio}`;
-        let resolved = false;
-        const done = () => { if (!resolved) { resolved = true; resolve(); } };
-        this.ttsPlayer.onended = done;
-        this.ttsPlayer.onpause = done; // ★ pause時もresolve（src変更やstop時のデッドロック防止）
-        this.ttsPlayer.play().catch(_e => done());
-      });
-    } else if (this.isTTSEnabled) {
-      this.pendingAckPromise = this.speakTextGCP(ackText, false);
-    }
-
-    this.addMessage('assistant', ackText);
-
-    // ★ 並行処理: ack再生完了を待たず、即LLMリクエスト開始（~700ms短縮）
-    //   pendingAckPromiseはsendMessage内でTTS再生前にawaitされる
-    if (this.els.userInput.value.trim()) {
-      this.isFromVoiceInput = true;
-      this.sendMessage();
-    }
-
+    // 待機状態のUI
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
     this.els.voiceStatus.className = 'voice-status stopped';
+    this.isProcessing = true;
+
+    // 待機アニメーション（6.5秒後）
+    if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
+    this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 6500);
   }
 
   // ========================================

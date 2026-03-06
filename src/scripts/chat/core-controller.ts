@@ -34,6 +34,9 @@ export class CoreController {
   protected isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
   protected isAndroid = /Android/i.test(navigator.userAgent);
 
+  // ★ 挨拶音声の遅延再生用（isUserInteracted=false時にバッファ）
+  protected _pendingGreetingAudio: string | null = null;
+
   protected els: any = {};
   protected ttsPlayer: HTMLAudioElement;
 
@@ -188,6 +191,26 @@ export class CoreController {
     };
     document.addEventListener('gourmet-app:reset', resetWrapper, { once: true });
 
+    // ★修正: ブラウザ自動再生ポリシー対応
+    // ページ内のどこかをクリック/タッチ/キー入力した時点で音声を有効化
+    // （mic/speakerボタンだけでなく、Send/Enter/画面タップでも有効化）
+    const autoEnableAudio = () => {
+      if (!this.isUserInteracted) {
+        console.log('[Core] Auto-enabling audio on first user interaction');
+        this.enableAudioPlayback();
+        // 挨拶音声が保留中の場合は再生
+        if (this._pendingGreetingAudio) {
+          console.log('[Core] Playing deferred greeting audio');
+          this.ttsPlayer.src = this._pendingGreetingAudio;
+          this.ttsPlayer.play().catch(() => {});
+          this._pendingGreetingAudio = null;
+        }
+      }
+    };
+    document.addEventListener('click', autoEnableAudio, { once: true });
+    document.addEventListener('touchstart', autoEnableAudio, { once: true });
+    document.addEventListener('keydown', autoEnableAudio, { once: true });
+
     // ★追加: バックグラウンド復帰時の復旧処理
     document.addEventListener('visibilitychange', async () => {
       if (document.hidden) {
@@ -316,6 +339,8 @@ export class CoreController {
         // AI音声（PCM 24kHz base64）
         console.log(`[Core] WS audio received: ${msg.data?.length || 0} chars`);
         this.isAISpeaking = true;
+        if (this.isRecording) this.stopStreamingSTT();
+        this.hideWaitOverlay();
         this.playPcmAudio(msg.data);
         break;
       case 'rest_audio':
@@ -616,15 +641,14 @@ export class CoreController {
     this.els.voiceStatus.className = 'voice-status stopped';
   }
 
+  // ★ Live API修正: 音声は既にGeminiに送信・処理済み
+  // turn_completeでaudio/transcriptionが自動的に到着するため、テキスト再送信は不要
   protected async handleStreamingSTTComplete(transcript: string) {
     this.stopStreamingSTT();
 
     if ('mediaSession' in navigator) {
       try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
     }
-
-    this.els.voiceStatus.innerHTML = this.t('voiceStatusComplete');
-    this.els.voiceStatus.className = 'voice-status';
 
     const normTranscript = this.normalizeText(transcript);
     if (this.isSemanticEcho(normTranscript, this.lastAISpeech)) {
@@ -634,52 +658,20 @@ export class CoreController {
         return;
     }
 
-    this.els.userInput.value = transcript;
+    // ユーザー発言を表示
     this.addMessage('user', transcript);
+    this.els.userInput.value = '';
 
-    const textLength = transcript.trim().replace(/\s+/g, '').length;
-    if (textLength < 2) {
-        const msg = this.t('shortMsgWarning');
-        this.addMessage('assistant', msg);
-        if (this.isTTSEnabled && this.isUserInteracted) {
-          await this.speakTextGCP(msg, true);
-        } else {
-          await new Promise(r => setTimeout(r, 2000));
-        }
-        this.els.userInput.value = '';
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        return;
-    }
+    console.log('[Core] Voice transcript received (Live API), waiting for response from turn_complete');
 
-    const ack = this.selectSmartAcknowledgment(transcript);
-    const preGeneratedAudio = this.preGeneratedAcks.get(ack.text);
-
-    let firstAckPromise: Promise<void> | null = null;
-    if (preGeneratedAudio && this.isTTSEnabled && this.isUserInteracted) {
-      firstAckPromise = new Promise<void>((resolve) => {
-        this.lastAISpeech = this.normalizeText(ack.text);
-        this.ttsPlayer.src = `data:audio/mp3;base64,${preGeneratedAudio}`;
-        this.ttsPlayer.onended = () => resolve();
-        this.ttsPlayer.play().catch(_e => resolve());
-      });
-    } else if (this.isTTSEnabled) {
-      firstAckPromise = this.speakTextGCP(ack.text, false);
-    }
-
-    this.addMessage('assistant', ack.text);
-
-    // C5修正: フォールバック応答を削除（バックエンドからWS経由で正式な応答が返る）
-    (async () => {
-      if (firstAckPromise) await firstAckPromise;
-      if (this.els.userInput.value.trim()) {
-        this.isFromVoiceInput = true;
-        this.sendMessage();
-      }
-    })();
-
+    // ★ Live API: テキスト再送信しない
+    // Geminiは音声入力を既に処理済み → turn_completeでaudio+transcriptionが到着する
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
     this.els.voiceStatus.className = 'voice-status stopped';
+    this.isProcessing = true;
+
+    if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
+    this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 4000);
   }
 
 // Part 1からの続き...
@@ -797,7 +789,9 @@ export class CoreController {
           await this.ttsPlayer.play();
           await playPromise;
         } else {
-          this.showClickPrompt();
+          // ★修正: 挨拶音声を保留して、ユーザー初回操作時に再生
+          console.log('[Core] Audio deferred: isUserInteracted=false, saving for later');
+          this._pendingGreetingAudio = `data:audio/mp3;base64,${data.audio}`;
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
