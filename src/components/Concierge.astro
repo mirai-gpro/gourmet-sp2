@@ -313,9 +313,8 @@ input:checked + .slider:before { transform: translateX(20px); }
   document.addEventListener('DOMContentLoaded', () => {
     const container = document.querySelector('.gourmet-chat-container') as HTMLElement;
     if (container) {
-      const apiBase = container.dataset.apiBase || '';
-      const backendUrl = container.dataset.backendUrl || '';
-      new ConciergeController(container, apiBase, backendUrl);
+      const apiBase = container.dataset.backendUrl || container.dataset.apiBase || '';
+      new ConciergeController(container, apiBase);
     }
   });
 </script>
