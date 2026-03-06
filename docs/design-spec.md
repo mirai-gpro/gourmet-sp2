@@ -44,11 +44,12 @@
 - `/api/cancel` → `/api/v2/rest/cancel`
 
 **接続先URL変更:**
-- `concierge.astro`: `backendUrl = 'https://support-base-hhasiuut7q-uc.a.run.app'` 追加
-- REST API: Vercel rewrites 経由（same-origin, `apiBaseUrl=''`）
-- Socket.IO: Vercel プロキシ非対応のためバックエンドに直接接続（`backendUrl` 使用）
+- `concierge.astro` / `index.astro`: `backendUrl = 'https://support-base-hhasiuut7q-uc.a.run.app'` 追加
+- HTTP fetch: `apiBase=''`（same-origin、Vercel rewrites 経由）。**フロントエンドからバックエンドへ直接REST呼び出しはしない。**
+- Socket.IO: `backendUrl` で直接接続（Vercel プロキシ非対応）
+- `apiBase`（fetch用）と `backendUrl`（Socket.IO用）は**別々に管理**
 
-**ロジック変更:** なし（パス文字列の置換と接続先設定変更のみ）
+**ロジック変更:** `initSocket()` の接続先を `this.apiBase` → `this.container.dataset.backendUrl` に変更
 
 ---
 
@@ -57,47 +58,35 @@
 ### 症状
 コンシェルジュページ (`/concierge`) でマイクボタン・テキスト入力・全操作が反応しない。
 
-### コンソールログから確認済みの事実
-- `[Core] Starting initialization...` → 初期化開始 ✅
-- `[Core] Initialization completed` → 初期化完了 ✅
-- Socket.IO接続ログ（`connect`イベント）が出ていない
-- `[LAM External] TTS play - frameBuffer has 0 frames` → TTS再生試行・失敗
-- `ttsActive=true` のまま固着
+### 原因
+`Concierge.astro` / `GourmetChat.astro` のスクリプトで:
+```typescript
+const apiBase = container.dataset.backendUrl || container.dataset.apiBase || '';
+```
+`backendUrl`（Socket.IO直接接続用）が `apiBase` として取得され、HTTP fetch 呼び出しがバックエンドに直接送信されてしまう（クロスオリジン → CORS でブロック）。
 
-### 調査が必要な項目
-1. Socket.IO接続は確立されているか？（connectイベントのログが空）
-2. `isUserInteracted` がfalseのままか？（ブラウザ自動再生ポリシー）
-3. `isAISpeaking` / `isProcessing` / `!ttsPlayer.paused` のいずれかが stuck しているか？
-4. マイクボタンのクリックイベント自体が発火しているか？
+仕様書③の設計意図（HTTP=same-origin / Socket.IO=直接接続）と実装が不一致。
 
----
+### 修正内容
+仕様書③の設計通り、`apiBase`（HTTP用）と `backendUrl`（Socket.IO用）を分離する:
 
-## 3. 修正方針（案）
-
-> **注意: 以下は案であり、承認前にコードを変更しない。**
-
-### 修正方針A: 最小限のバグ修正のみ
-- 原因を特定し、必要最小限の修正のみ行う
-- アーキテクチャ変更は一切しない
-
-### 修正方針B: デバッグログ追加で原因特定を先行
-- `toggleRecording()` にconsole.logを追加して状態を可視化
-- `initSocket()` のconnectイベントにログ追加
-- 原因特定後に修正を決定
+1. **`Concierge.astro` / `GourmetChat.astro`**: `apiBase = container.dataset.apiBase || ''`（`backendUrl` を混ぜない）
+2. **`concierge-controller.ts` `initSocket()`**: `io(this.container.dataset.backendUrl || window.location.origin)`
+3. **`core-controller.ts` `initSocket()`**: 同上
 
 ---
 
-## 4. ファイル一覧と変更可否
+## 3. 修正対象ファイル
 
-| ファイル | 変更可否 | 理由 |
-|---|---|---|
-| `core-controller.ts` | ❌ 変更しない | チャットページの動作に影響 |
-| `concierge-controller.ts` | ⚠️ バグ修正のみ | ロジック変更・仕様変更は不可 |
-| `Concierge.astro` | ⚠️ バグ修正のみ | HTML構造変更は不可 |
-| `audio-manager.ts` | ❌ 変更しない | 共通モジュール |
+| ファイル | 修正内容 |
+|---|---|
+| `Concierge.astro` | スクリプト: `apiBase` から `backendUrl` を除外 |
+| `GourmetChat.astro` | スクリプト: `apiBase` から `backendUrl` を除外 |
+| `concierge-controller.ts` | `initSocket()`: `backendUrl` を `data-backend-url` から取得 |
+| `core-controller.ts` | `initSocket()`: `backendUrl` を `data-backend-url` から取得 |
 
 ---
 
-## 5. 承認待ち
+## 4. 承認待ち
 
-上記設計に基づき、修正方針の承認をお願いします。
+上記修正内容の承認をお願いします。
