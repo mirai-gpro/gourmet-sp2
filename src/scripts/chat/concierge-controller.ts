@@ -84,10 +84,12 @@ export class ConciergeController extends CoreController {
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // BUG2修正: バックエンドは user_id, mode, language, dialogue_type をトップレベルで期待
         body: JSON.stringify({
-          user_info: { user_id: userId },
+          mode: 'concierge',
           language: this.currentLanguage,
-          mode: 'concierge'
+          dialogue_type: 'live',
+          user_id: userId
         })
       });
       const data = await res.json();
@@ -101,7 +103,8 @@ export class ConciergeController extends CoreController {
       // リップシンク: バックエンドTTSエンドポイント経由で表情データ取得（追加接続不要）
 
       // ✅ バックエンドからの初回メッセージを使用（長期記憶対応）
-      const greetingText = data.initial_message || this.t('initialGreetingConcierge');
+      // BUG3修正: バックエンドは greeting フィールドを返す（initial_message ではない）
+      const greetingText = data.greeting || this.t('initialGreetingConcierge');
       this.addMessage('assistant', greetingText, null, true);
 
       const ackTexts = [
@@ -395,9 +398,12 @@ export class ConciergeController extends CoreController {
     }
 
     if (expression?.names && expression?.frames?.length > 0) {
-      const frames = expression.frames.map((f: { weights: number[] }) => {
+      // BUG1修正: バックエンドのframesは number[][] (2D配列)
+      // 各フレームは [0.0, 0.0, ..., 0.15, ...] の52要素配列
+      // f.weights[i] ではなく f[i] でアクセスする
+      const frames = expression.frames.map((f: number[]) => {
         const frame: { [key: string]: number } = {};
-        expression.names.forEach((name: string, i: number) => { frame[name] = f.weights[i]; });
+        expression.names.forEach((name: string, i: number) => { frame[name] = f[i]; });
         return frame;
       });
       lamController.queueExpressionFrames(frames, expression.frame_rate || 30);
