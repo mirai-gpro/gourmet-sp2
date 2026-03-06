@@ -136,7 +136,8 @@ export class ConciergeController extends CoreController {
   // ========================================
   protected initSocket() {
     // @ts-ignore
-    this.socket = io(this.apiBase || window.location.origin);
+    const backendUrl = this.container.dataset.backendUrl || window.location.origin;
+    this.socket = io(backendUrl);
     
     this.socket.on('connect', () => { });
     

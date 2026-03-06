@@ -233,7 +233,8 @@ export class CoreController {
   // ★修正: Socket.IO接続設定に再接続オプションを追加（transportsは削除）
   protected initSocket() {
     // @ts-ignore
-    this.socket = io(this.apiBase || window.location.origin, {
+    const backendUrl = this.container.dataset.backendUrl || window.location.origin;
+    this.socket = io(backendUrl, {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,
