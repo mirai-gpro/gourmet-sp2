@@ -34,11 +34,11 @@ export class CoreController {
   protected isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
   protected isAndroid = /Android/i.test(navigator.userAgent);
 
-  // ★ 挨拶音声の遅延再生用（isUserInteracted=false時にバッファ）
+  // ★ 挨拶音声の遅延再生用（isUserInteracted=false時にバッファ — raw base64）
   protected _pendingGreetingAudio: string | null = null;
 
   protected els: any = {};
-  protected ttsPlayer: HTMLAudioElement;
+  protected ttsPlayer: HTMLAudioElement; // LAM avatar 連携用に維持
 
   protected readonly LANGUAGE_CODE_MAP = {
     ja: { tts: 'ja-JP', stt: 'ja-JP', voice: 'ja-JP-Chirp3-HD-Leda' },
@@ -198,11 +198,10 @@ export class CoreController {
       if (!this.isUserInteracted) {
         console.log('[Core] Auto-enabling audio on first user interaction');
         this.enableAudioPlayback();
-        // 挨拶音声が保留中の場合は再生
+        // 挨拶音声が保留中の場合は Web Audio API で再生
         if (this._pendingGreetingAudio) {
-          console.log('[Core] Playing deferred greeting audio');
-          this.ttsPlayer.src = this._pendingGreetingAudio;
-          this.ttsPlayer.play().catch(() => {});
+          console.log('[Core] Playing deferred greeting audio via Web Audio API');
+          this.audioManager.playMp3Audio(this._pendingGreetingAudio).catch(() => {});
           this._pendingGreetingAudio = null;
         }
       }
@@ -336,29 +335,37 @@ export class CoreController {
         this.resetInputState();
         break;
       case 'audio':
-        // AI音声（PCM 24kHz base64）
+        // AI音声（PCM 24kHz base64）→ Web Audio API で再生
         console.log(`[Core] WS audio received: ${msg.data?.length || 0} chars`);
         this.isAISpeaking = true;
         if (this.isRecording) this.stopStreamingSTT();
         this.hideWaitOverlay();
-        this.playPcmAudio(msg.data);
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+        this.els.voiceStatus.className = 'voice-status speaking';
+        if (this.isUserInteracted) {
+          this.audioManager.playPcmAudio(msg.data).then(() => {
+            this.isAISpeaking = false;
+            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+            this.els.voiceStatus.className = 'voice-status stopped';
+          }).catch(() => { this.isAISpeaking = false; });
+        } else {
+          this.isAISpeaking = false;
+        }
         break;
       case 'rest_audio':
-        // TTS音声（MP3 base64）
+        // TTS音声（MP3 base64）→ Web Audio API で再生
         this.isAISpeaking = true;
         if (this.isRecording) this.stopStreamingSTT();
         if (msg.text) this.lastAISpeech = this.normalizeText(msg.text);
         this.stopCurrentAudio();
-        this.ttsPlayer.src = `data:audio/mp3;base64,${msg.data}`;
-        this.ttsPlayer.onended = () => {
-          this.isAISpeaking = false;
-          this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-          this.els.voiceStatus.className = 'voice-status stopped';
-        };
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
         this.els.voiceStatus.className = 'voice-status speaking';
         if (this.isUserInteracted) {
-          this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+          this.audioManager.playMp3Audio(msg.data).then(() => {
+            this.isAISpeaking = false;
+            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+            this.els.voiceStatus.className = 'voice-status stopped';
+          }).catch(() => { this.isAISpeaking = false; });
         } else {
           this.isAISpeaking = false;
         }
@@ -429,57 +436,6 @@ export class CoreController {
   protected hideReconnectingUI() {
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
     this.els.voiceStatus.className = 'voice-status stopped';
-  }
-
-  // ★ PCM 24kHz音声をWAV形式で再生
-  protected playPcmAudio(base64Data: string) {
-    console.log(`[Core] playPcmAudio: data=${base64Data.length} chars, isUserInteracted=${this.isUserInteracted}`);
-    const pcmBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-
-    // WAVヘッダー生成（PCM 16-bit mono 24kHz）
-    const header = new ArrayBuffer(44);
-    const v = new DataView(header);
-    const sr = 24000, ch = 1, bps = 16;
-    v.setUint32(0, 0x52494646, false); // RIFF
-    v.setUint32(4, 36 + pcmBytes.length, true);
-    v.setUint32(8, 0x57415645, false); // WAVE
-    v.setUint32(12, 0x666D7420, false); // fmt
-    v.setUint32(16, 16, true);
-    v.setUint16(20, 1, true); // PCM
-    v.setUint16(22, ch, true);
-    v.setUint32(24, sr, true);
-    v.setUint32(28, sr * ch * bps / 8, true);
-    v.setUint16(32, ch * bps / 8, true);
-    v.setUint16(34, bps, true);
-    v.setUint32(36, 0x64617461, false); // data
-    v.setUint32(40, pcmBytes.length, true);
-
-    const wav = new Blob([header, pcmBytes], { type: 'audio/wav' });
-    const url = URL.createObjectURL(wav);
-
-    this.stopCurrentAudio();
-    this.ttsPlayer.src = url;
-    this.ttsPlayer.onended = () => {
-      URL.revokeObjectURL(url);
-      this.isAISpeaking = false;
-      this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-      this.els.voiceStatus.className = 'voice-status stopped';
-    };
-    this.ttsPlayer.onerror = () => {
-      URL.revokeObjectURL(url);
-      this.isAISpeaking = false;
-    };
-    this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-    this.els.voiceStatus.className = 'voice-status speaking';
-    if (this.isUserInteracted) {
-      this.ttsPlayer.play().catch(() => {
-        this.isAISpeaking = false;
-        URL.revokeObjectURL(url);
-      });
-    } else {
-      this.isAISpeaking = false;
-      URL.revokeObjectURL(url);
-    }
   }
 
   protected async initializeSession() {
@@ -570,7 +526,7 @@ export class CoreController {
       return;
     }
 
-    if (this.isProcessing || this.isAISpeaking || !this.ttsPlayer.paused) {
+    if (this.isProcessing || this.isAISpeaking || this.audioManager.isPlaying) {
       if (this.isProcessing) {
         fetch(`${this.apiBase}/api/v2/rest/cancel`, {
           method: 'POST',
@@ -713,12 +669,8 @@ export class CoreController {
         try {
           const preGeneratedAudio = this.preGeneratedAcks.get(ack.text);
           if (preGeneratedAudio && this.isUserInteracted) {
-            firstAckPromise = new Promise<void>((resolve) => {
-              this.lastAISpeech = this.normalizeText(ack.text);
-              this.ttsPlayer.src = `data:audio/mp3;base64,${preGeneratedAudio}`;
-              this.ttsPlayer.onended = () => resolve();
-              this.ttsPlayer.play().catch(_e => resolve());
-            });
+            this.lastAISpeech = this.normalizeText(ack.text);
+            firstAckPromise = this.audioManager.playMp3Audio(preGeneratedAudio);
           } else {
             firstAckPromise = this.speakTextGCP(ack.text, false);
           }
@@ -742,8 +694,8 @@ export class CoreController {
     if (skipAudio) return Promise.resolve();
     if (!this.isTTSEnabled || !text) return Promise.resolve();
 
-    if (stopPrevious && this.isTTSEnabled) {
-      this.ttsPlayer.pause();
+    if (stopPrevious) {
+      this.stopCurrentAudio();
     }
 
     const cleanText = this.stripMarkdown(text);
@@ -766,33 +718,20 @@ export class CoreController {
       });
       const data = await response.json();
       if (data.success && data.audio) {
-        this.ttsPlayer.src = `data:audio/mp3;base64,${data.audio}`;
-        const playPromise = new Promise<void>((resolve) => {
-          this.ttsPlayer.onended = async () => {
-            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-            this.els.voiceStatus.className = 'voice-status stopped';
-            this.isAISpeaking = false;
-            if (autoRestartMic) {
-              if (!this.isRecording) {
-                try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
-              }
-            }
-            resolve();
-          };
-          this.ttsPlayer.onerror = () => {
-            this.isAISpeaking = false;
-            resolve();
-          };
-        });
-
         if (this.isUserInteracted) {
           this.lastAISpeech = this.normalizeText(cleanText);
-          await this.ttsPlayer.play();
-          await playPromise;
+          // ★ Web Audio API で再生（iOS 受話口問題の解消）
+          await this.audioManager.playMp3Audio(data.audio);
+          this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+          this.els.voiceStatus.className = 'voice-status stopped';
+          this.isAISpeaking = false;
+          if (autoRestartMic && !this.isRecording) {
+            try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
+          }
         } else {
-          // ★修正: 挨拶音声を保留して、ユーザー初回操作時に再生
+          // ★ 挨拶音声を保留（raw base64）、初回操作時に audioManager.playMp3Audio で再生
           console.log('[Core] Audio deferred: isUserInteracted=false, saving for later');
-          this._pendingGreetingAudio = `data:audio/mp3;base64,${data.audio}`;
+          this._pendingGreetingAudio = data.audio;
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
@@ -829,10 +768,15 @@ export class CoreController {
       const clickPrompt = this.container.querySelector('.click-prompt');
       if (clickPrompt) clickPrompt.remove();
       this.unlockAudioParams();
+      // AudioContext を事前ウォームアップ（ユーザージェスチャーコンテキストで）
+      this.audioManager.ensureAudioContext().catch(() => {});
     }
   }
 
   protected stopCurrentAudio() {
+    // Web Audio API 再生を停止
+    this.audioManager.stopPlayback();
+    // LAM avatar 連携用 ttsPlayer も停止
     this.ttsPlayer.pause();
     this.ttsPlayer.currentTime = 0;
   }
