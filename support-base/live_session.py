@@ -313,93 +313,43 @@ class LiveSession:
 
     def _execute_restaurant_search(self, query, area):
         """
-        Google Places APIで直接レストラン検索（Gemini REST呼び出しなし）
-        LiveAPIのGeminiが既にユーザーの意図を解釈済みなので、ここではAPI検索のみ実行
+        既存の support_core.py + api_integrations.py でショップ検索実行
+        🚨 仕様書 Section 3-1-3 準拠: 既存ロジック維持
         """
         try:
-            from api_integrations import (
-                extract_area_from_text, get_region_from_area,
-                enrich_shops_with_photos
-            )
-            import requests as req
-            import os
+            from support_core import SupportSession, SupportAssistant, SYSTEM_PROMPTS
+            from api_integrations import enrich_shops_with_photos, extract_area_from_text
 
-            language = self.language
+            session = SupportSession(self.session_id)
+            session_data = session.get_data()
 
-            if not area:
-                area = extract_area_from_text(query, language)
-
-            # Google Places APIで直接検索
-            api_key = os.getenv('GOOGLE_PLACES_API_KEY', '')
-            if not api_key:
-                logger.warning("[LiveSession] GOOGLE_PLACES_API_KEY not set")
+            if not session_data:
+                logger.warning(f"[LiveSession] Session not found: {self.session_id}")
                 return {'shops': [], 'response': '', 'tts_audio': ''}
 
-            search_query = f"{query} {area}".strip() if area else query
+            language = session_data.get('language', self.language)
 
-            # Geocoding情報を取得（位置バイアス用）
-            geo_info = None
-            if area:
-                try:
-                    geo_info = get_region_from_area(area, language)
-                except Exception as e:
-                    logger.warning(f"[LiveSession] Geocoding error: {e}")
+            assistant = SupportAssistant(session, SYSTEM_PROMPTS)
+            result = assistant.process_user_message(query, 'conversation')
 
-            params = {
-                'query': search_query,
-                'key': api_key,
-                'language': language,
-                'type': 'restaurant'
-            }
-            if geo_info and geo_info.get('lat') and geo_info.get('lng'):
-                params['location'] = f"{geo_info['lat']},{geo_info['lng']}"
-                params['radius'] = 3000
+            shops = result.get('shops') or []
+            response_text = result.get('response', '')
 
-            logger.info(f"[LiveSession] Places API search: {search_query}")
-            response = req.get(
-                'https://maps.googleapis.com/maps/api/place/textsearch/json',
-                params=params, timeout=10
-            )
-            data = response.json()
-
-            if data.get('status') != 'OK' or not data.get('results'):
-                logger.warning(f"[LiveSession] Places API: {data.get('status')}")
-                return {'shops': [], 'response': '', 'tts_audio': ''}
-
-            # 上位5件を取得
-            raw_shops = []
-            for place in data['results'][:5]:
-                if place.get('business_status', 'OPERATIONAL') != 'OPERATIONAL':
-                    continue
-                raw_shops.append({
-                    'name': place.get('name', ''),
-                    'area': area,
-                    'description': place.get('formatted_address', ''),
-                    'rating': place.get('rating'),
-                    'category': ''
-                })
-
-            if not raw_shops:
-                return {'shops': [], 'response': '', 'tts_audio': ''}
-
-            # 写真・URL等のエンリッチメント
-            shops = enrich_shops_with_photos(raw_shops, area, language) or []
-            logger.info(f"[LiveSession] Enriched shops: {len(shops)}")
-
-            # レスポンステキスト生成（Gemini LiveAPIが音声で紹介するため簡潔に）
-            shop_names = [s.get('name', '') for s in shops]
-            response_text = f"{area}エリアで{len(shops)}件のレストランが見つかりました: {', '.join(shop_names)}"
-
-            # Cloud TTS で音声合成（ショップカード紹介用）
-            tts_audio = ''
             if shops:
-                tts_audio = self._generate_tts(response_text, language)
+                if not area:
+                    area = extract_area_from_text(query, language)
+                shops = enrich_shops_with_photos(shops, area, language) or []
 
-            return {
-                'shops': shops,
-                'response': response_text,
-                'tts_audio': tts_audio
-            }
+                # Cloud TTS で長文の紹介セリフを音声合成（既存ロジック維持）
+                if shops:
+                    tts_audio = self._generate_tts(response_text, language)
+                    return {
+                        'shops': shops,
+                        'response': response_text,
+                        'tts_audio': tts_audio
+                    }
+
+            return {'shops': shops, 'response': response_text, 'tts_audio': ''}
 
         except Exception as e:
             logger.error(f"[LiveSession] Restaurant search error: {e}")
