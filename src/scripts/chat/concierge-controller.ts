@@ -128,27 +128,31 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
-      const ackPreGen = ackTexts.map(async (text) => {
-        try {
-          const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
-              session_id: this.sessionId
-            })
-          });
-          const ackData = await ackResponse.json();
-          if (ackData.success && ackData.audio) {
-            this.preGeneratedAcks.set(text, ackData.audio);
-          }
-        } catch (_e) { }
-      });
-      Promise.all(ackPreGen).catch(() => {});
+      // ★ 挨拶音声: session/start レスポンスに同梱されていれば即再生（TTS不要）
+      const playGreeting = data.greeting_audio
+        ? this.playGreetingAudioDirect(data.greeting_audio)
+        : this.speakTextGCP(greetingText);
 
-      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
-      this.speakTextGCP(greetingText).catch(() => {});
+      playGreeting.then(() => {
+        // 挨拶再生完了後にackプリジェネレーションを開始（帯域競合を回避）
+        const ackPreGen = ackTexts.map(async (text) => {
+          try {
+            const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
+                session_id: this.sessionId
+              })
+            });
+            const ackData = await ackResponse.json();
+            if (ackData.success && ackData.audio) {
+              this.preGeneratedAcks.set(text, ackData.audio);
+            }
+          } catch (_e) { }
+        });
+        Promise.all(ackPreGen).catch(() => {});
+      }).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
