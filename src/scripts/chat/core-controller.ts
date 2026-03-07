@@ -253,11 +253,17 @@ export class CoreController {
       onText: (text: string) => {
         this.handleLiveText(text);
       },
+      onInputTranscription: (text: string) => {
+        this.handleLiveInputTranscription(text);
+      },
       onAudio: (base64: string) => {
         this.handleLiveAudio(base64);
       },
       onTurnComplete: () => {
         this.handleLiveTurnComplete();
+      },
+      onInterrupted: () => {
+        this.handleLiveInterrupted();
       },
       onShops: (data: { response: string; shops: any[]; ttsAudio?: string }) => {
         this.handleLiveShops(data);
@@ -351,12 +357,26 @@ export class CoreController {
   // ========================================
 
   protected handleLiveText(text: string) {
+    // output_audio_transcription からのテキスト（AI発話のテキスト版）
     this.pendingResponseText += text;
+  }
+
+  protected handleLiveInputTranscription(text: string) {
+    // input_audio_transcription からのテキスト（ユーザー発話のテキスト版）
+    this.addMessage('user', text);
   }
 
   protected handleLiveAudio(base64: string) {
     this.pendingAudioChunks.push(base64);
     this.isAISpeaking = true;
+  }
+
+  protected handleLiveInterrupted() {
+    // Gemini VAD が割り込みを検知 → 現在の再生を停止
+    this.stopCurrentAudio();
+    this.pendingAudioChunks = [];
+    this.pendingResponseText = '';
+    this.isAISpeaking = false;
   }
 
   protected handleLiveTurnComplete() {
@@ -561,7 +581,7 @@ export class CoreController {
             if (this.liveWs) this.liveWs.sendAudio(base64Chunk);
           },
           () => {
-            // 無音検知 → 録音停止
+            // MAX_RECORDING_TIME 到達 → 録音停止
             this.stopRecording();
           },
           () => {
