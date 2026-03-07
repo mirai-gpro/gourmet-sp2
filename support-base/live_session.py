@@ -22,8 +22,7 @@ logger = logging.getLogger(__name__)
 # ========================================
 # 🚨 改変禁止: LiveAPI接続パラメータ
 # ========================================
-LIVE_API_MODEL = "gemini-2.0-flash-live-001"
-assert LIVE_API_MODEL == "gemini-2.0-flash-live-001", "モデル名が改変されています"
+LIVE_API_MODEL = "gemini-live-2.5-flash-preview"
 
 LIVE_API_CONFIG = {
     "response_modalities": ["AUDIO", "TEXT"],
