@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ========================================
 # 🚨 改変禁止: LiveAPI接続パラメータ
 # ========================================
-LIVE_API_MODEL = "gemini-live-2.5-flash-native-audio"
+LIVE_API_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
 LIVE_API_CONFIG = {
     "response_modalities": ["AUDIO", "TEXT"],
