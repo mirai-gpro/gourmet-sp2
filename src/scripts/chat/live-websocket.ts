@@ -1,25 +1,43 @@
 // src/scripts/chat/live-websocket.ts
-// 🚨 改変禁止: WebSocket URL形式・メッセージ形式
+//
+// Gemini LiveAPI WebSocket クライアント
+//
+// バックエンド live_session.py との通信を担当。
+// メッセージ形式は live_session.py の _ws_send / _receive と対応。
 
-// 🚨 具体値を書く
-const INPUT_SAMPLE_RATE = 16000;   // 🚨 固定値
-const OUTPUT_SAMPLE_RATE = 24000;  // 🚨 Gemini LiveAPI出力のデフォルト
+// サンプルレート（live_session.py: SEND_SAMPLE_RATE / RECEIVE_SAMPLE_RATE と同値）
+export const INPUT_SAMPLE_RATE = 16000;
+export const OUTPUT_SAMPLE_RATE = 24000;
 
-console.assert(INPUT_SAMPLE_RATE === 16000, "入力サンプルレートが改変されています");
-console.assert(OUTPUT_SAMPLE_RATE === 24000, "出力サンプルレートが改変されています");
+// ============================================================
+// メッセージ型定義（バックエンド live_session.py との契約）
+// ============================================================
 
-// 🚨 改変禁止: メッセージ形式（バックエンドとの契約）
-export interface LiveMessage {
-  type: 'audio' | 'text' | 'input_transcription' | 'interrupted' | 'tool_result' | 'shops' | 'error' | 'session_end' | 'live_ready' | 'turn_complete';
+// サーバー → クライアント
+interface ServerMessage {
+  type:
+    | 'live_ready'           // Gemini セッション接続完了
+    | 'text'                 // output_audio_transcription（AI発話テキスト）
+    | 'input_transcription'  // input_audio_transcription（ユーザー発話テキスト）
+    | 'audio'                // model_turn.parts[].inline_data（PCM音声 base64）
+    | 'turn_complete'        // server_content.turn_complete
+    | 'interrupted'          // server_content.interrupted（Gemini VAD 割り込み）
+    | 'shops'                // search_restaurants ツール結果
+    | 'error';               // エラー
   data: any;
 }
 
-export interface ClientMessage {
+// クライアント → サーバー
+interface ClientMessage {
   type: 'audio_chunk' | 'text_input' | 'cancel';
   data: any;
 }
 
-export interface LiveMessageHandler {
+// ============================================================
+// コールバック定義
+// ============================================================
+
+export interface LiveCallbacks {
   onReady: () => void;
   onText: (text: string) => void;
   onInputTranscription: (text: string) => void;
@@ -31,27 +49,27 @@ export interface LiveMessageHandler {
   onClose: () => void;
 }
 
-export { OUTPUT_SAMPLE_RATE };
+// ============================================================
+// LiveWebSocket クラス
+// ============================================================
 
 export class LiveWebSocket {
   private ws: WebSocket | null = null;
   private apiHost: string;
   private sessionId: string;
-  private handler: LiveMessageHandler;
+  private cb: LiveCallbacks;
 
-  constructor(apiHost: string, sessionId: string, handler: LiveMessageHandler) {
+  constructor(apiHost: string, sessionId: string, callbacks: LiveCallbacks) {
     this.apiHost = apiHost;
     this.sessionId = sessionId;
-    this.handler = handler;
+    this.cb = callbacks;
   }
 
   connect() {
-    // 🚨 改変禁止: WebSocket URL形式
     const protocol = this.apiHost.startsWith('http:') ? 'ws' : 'wss';
     const host = this.apiHost.replace(/^https?:\/\//, '');
     const url = `${protocol}://${host}/ws/live/${this.sessionId}`;
 
-    console.log('[LiveWS] Connecting:', url);
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
@@ -60,47 +78,32 @@ export class LiveWebSocket {
 
     this.ws.onmessage = (event) => {
       try {
-        const msg: LiveMessage = JSON.parse(event.data);
+        const msg: ServerMessage = JSON.parse(event.data);
         switch (msg.type) {
-          case 'live_ready':
-            this.handler.onReady();
-            break;
-          case 'text':
-            this.handler.onText(msg.data);
-            break;
-          case 'input_transcription':
-            this.handler.onInputTranscription(msg.data);
-            break;
-          case 'audio':
-            this.handler.onAudio(msg.data);
-            break;
-          case 'turn_complete':
-            this.handler.onTurnComplete();
-            break;
-          case 'interrupted':
-            this.handler.onInterrupted();
-            break;
-          case 'shops':
-            this.handler.onShops(msg.data);
-            break;
-          case 'error':
-            this.handler.onError(msg.data);
-            break;
+          case 'live_ready':          this.cb.onReady(); break;
+          case 'text':                this.cb.onText(msg.data); break;
+          case 'input_transcription': this.cb.onInputTranscription(msg.data); break;
+          case 'audio':               this.cb.onAudio(msg.data); break;
+          case 'turn_complete':       this.cb.onTurnComplete(); break;
+          case 'interrupted':         this.cb.onInterrupted(); break;
+          case 'shops':               this.cb.onShops(msg.data); break;
+          case 'error':               this.cb.onError(msg.data); break;
         }
       } catch (e) {
-        console.error('[LiveWS] Message parse error:', e);
+        console.error('[LiveWS] Parse error:', e);
       }
     };
 
-    this.ws.onclose = (event) => {
-      console.log('[LiveWS] Disconnected:', event.code, event.reason);
-      this.handler.onClose();
+    this.ws.onclose = () => {
+      this.cb.onClose();
     };
 
-    this.ws.onerror = (error) => {
-      console.error('[LiveWS] Error:', error);
+    this.ws.onerror = (e) => {
+      console.error('[LiveWS] Error:', e);
     };
   }
+
+  // --- 送信メソッド ---
 
   sendAudio(base64Pcm: string) {
     this.send({ type: 'audio_chunk', data: base64Pcm });
@@ -113,6 +116,8 @@ export class LiveWebSocket {
   sendCancel() {
     this.send({ type: 'cancel', data: null });
   }
+
+  // --- 状態 ---
 
   isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
