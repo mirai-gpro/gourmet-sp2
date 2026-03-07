@@ -7,8 +7,8 @@ export class ChatController extends CoreController {
   constructor(container: HTMLElement, apiBase: string) {
     super(container, apiBase);
     this.audioManager = new AudioManager(4500);
-    // チャットモードに設定
-    this.currentMode = 'chat';
+    // チャットモードはバックエンドの 'gourmet' モードを使用
+    this.currentMode = 'gourmet';
     this.init();
   }
 
