@@ -515,26 +515,28 @@ export class CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
-      const ackPreGen = ackTexts.map(async (text) => {
-        try {
-          const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text, language_code: langConfig.tts, voice_name: langConfig.voice
-            })
-          });
-          const ackData = await ackResponse.json();
-          if (ackData.success && ackData.audio) {
-            this.preGeneratedAcks.set(text, ackData.audio);
-          }
-        } catch (_e) { }
-      });
-      Promise.all(ackPreGen).catch(() => {});
-
-      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
-      this.speakTextGCP(this.t('initialGreeting')).catch(() => {});
+      // ★ 挨拶音声: session/start レスポンスに同梱されていれば即再生（TTS不要）
+      const playGreeting = data.greeting_audio
+        ? this.playGreetingAudioDirect(data.greeting_audio)
+        : this.speakTextGCP(this.t('initialGreeting'));
+      playGreeting.then(() => {
+        const ackPreGen = ackTexts.map(async (text) => {
+          try {
+            const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text: text, language_code: langConfig.tts, voice_name: langConfig.voice
+              })
+            });
+            const ackData = await ackResponse.json();
+            if (ackData.success && ackData.audio) {
+              this.preGeneratedAcks.set(text, ackData.audio);
+            }
+          } catch (_e) { }
+        });
+        Promise.all(ackPreGen).catch(() => {});
+      }).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
@@ -794,6 +796,36 @@ export class CoreController {
       this.unlockAudioParams();
       // AudioContext を事前ウォームアップ（ユーザージェスチャーコンテキストで）
       this.audioManager.ensureAudioContext().catch(() => {});
+    }
+  }
+
+  protected async playGreetingAudioDirect(audioBase64: string): Promise<void> {
+    /**
+     * session/start レスポンスに同梱された挨拶音声を直接再生（追加TTSリクエスト不要）
+     */
+    if (!this.isTTSEnabled || !audioBase64) return;
+
+    try {
+      this.isAISpeaking = true;
+      this.els.voiceStatus.innerHTML = this.t('voiceStatusSynthesizing');
+      this.els.voiceStatus.className = 'voice-status speaking';
+
+      if (this.isUserInteracted) {
+        await this.audioManager.playMp3Audio(audioBase64);
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.isAISpeaking = false;
+      } else {
+        console.log('[Core] Greeting audio deferred: isUserInteracted=false');
+        this._pendingGreetingAudio = audioBase64;
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.isAISpeaking = false;
+      }
+    } catch (_error) {
+      this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+      this.els.voiceStatus.className = 'voice-status stopped';
+      this.isAISpeaking = false;
     }
   }
 
