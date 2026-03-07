@@ -42,6 +42,14 @@ echo "✅ ビルド完了"
 # 3. Cloud Runにデプロイ
 echo ""
 echo "[3/3] Cloud Runにデプロイ中..."
+
+# シークレット参照との競合を回避
+echo "  既存のシークレット参照をクリア中..."
+gcloud run services update "${SERVICE_NAME}" \
+  --region "${REGION}" \
+  --remove-secrets GEMINI_API_KEY \
+  --project "${PROJECT_ID}" 2>/dev/null || true
+
 gcloud run deploy "${SERVICE_NAME}" \
   --image "${IMAGE_NAME}" \
   --platform managed \
