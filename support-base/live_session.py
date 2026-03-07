@@ -61,6 +61,36 @@ SEARCH_TOOL = {
     ]
 }
 
+# LiveAPI 用プロンプト補足（音声会話向け UX フロー指示）
+LIVE_API_PROMPT_SUPPLEMENT = """
+
+## 【重要】LiveAPI 音声会話モードの応答ルール
+
+あなたは音声で直接ユーザーと会話しています。JSON形式ではなく、自然な話し言葉で応答してください。
+
+### レストラン検索時の応答フロー（必ず守ること）
+
+ユーザーがお店探しをリクエストした場合、**必ず以下の順序で応答してください**:
+
+1. **復唱**: ユーザーのリクエスト内容を自然に復唱する
+   - 例: 「恵比寿で焼き鳥のお店をお探しですね！」
+   - 例: 「渋谷エリアで、デートにぴったりなイタリアンですね！」
+
+2. **お待ちメッセージ**: 検索する旨を伝える
+   - 例: 「お調べしますので、少々お待ちください。」
+   - 例: 「ぴったりのお店を探してきますね、少々お待ちくださいませ。」
+
+3. **ツール呼び出し**: 上記を話した後に search_restaurants を呼び出す
+
+4. **検索結果の紹介**: ツール結果を受け取ったら、見つかったお店を簡潔に紹介する
+   - 例: 「5件のお店が見つかりました。画面にカードが表示されていますので、ぜひご覧ください。気になるお店があればお気軽にお聞きくださいね。」
+
+### 応答スタイル
+- 丁寧だが堅すぎない、親しみやすいコンシェルジュ口調
+- 1回の発話は簡潔に（長文は避ける）
+- 「えーっと」「そうですね」など自然なフィラーは適度に使ってOK
+"""
+
 # Cloud TTS 音声マッピング（ショップカード紹介用、REST フォールバック時に使用）
 VOICE_MAP = {
     'ja': ('ja-JP', 'ja-JP-Chirp3-HD-Leda'),
@@ -123,7 +153,7 @@ class LiveSession:
 
     def __init__(self, session_id, system_prompt, ws, language='ja', mode='chat'):
         self.session_id = session_id
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt + LIVE_API_PROMPT_SUPPLEMENT
         self.ws = ws
         self.language = language
         self.mode = mode
@@ -296,6 +326,9 @@ class LiveSession:
             if fc.name == "search_restaurants":
                 query = fc.args.get("query", "") if fc.args else ""
                 area = fc.args.get("area", "") if fc.args else ""
+
+                # ウエイティングアニメーション開始をフロントに通知
+                self._ws_send(json.dumps({'type': 'searching'}))
 
                 result = await asyncio.get_event_loop().run_in_executor(
                     None,

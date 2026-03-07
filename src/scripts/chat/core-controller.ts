@@ -268,6 +268,9 @@ export class CoreController {
       onShops: (data: { response: string; shops: any[]; ttsAudio?: string }) => {
         this.handleLiveShops(data);
       },
+      onSearching: () => {
+        this.showWaitOverlay();
+      },
       onError: (msg: string) => {
         console.error('[LiveAPI] Error:', msg);
         this.hideWaitOverlay();
