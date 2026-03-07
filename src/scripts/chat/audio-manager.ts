@@ -109,11 +109,15 @@ export class AudioManager {
   }
 
   /**
-   * ストリーミング開始
-   * LiveAPI対応: Socket.IO → コールバック関数に変更
+   * ストリーミング開始（LiveAPI 専用）
+   *
+   * 無音検知（VAD）はサーバー側の Gemini automatic_activity_detection に
+   * 完全に委任する。クライアント側 VAD は使用しない。
+   * 音声は明示的に stopStreaming() が呼ばれるまで連続送信される。
+   *
    * @param onAudioChunk 音声チャンクのbase64データを受け取るコールバック
-   * @param onStopCallback 無音検知時の停止コールバック
-   * @param onSpeechStart 発話開始時のコールバック
+   * @param onStopCallback MAX_RECORDING_TIME 到達時の安全停止コールバック
+   * @param onSpeechStart 未使用（後方互換のため残す）
    */
   public async startStreaming(
     onAudioChunk: (base64: string) => void,
@@ -418,40 +422,9 @@ export class AudioManager {
       source.connect(this.audioWorkletNode);
       this.audioWorkletNode.connect(this.audioContext!.destination);
 
-      // VAD設定（変更なし）
-      this.analyser = this.audioContext!.createAnalyser();
-      this.analyser.fftSize = 512;
-      source.connect(this.analyser);
-      const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-      this.hasSpoken = false;
-      this.recordingStartTime = Date.now();
-      this.consecutiveSilenceCount = 0;
-
-      this.vadCheckInterval = window.setInterval(() => {
-        if (!this.analyser) return;
-        if (Date.now() - this.recordingStartTime < this.MIN_RECORDING_TIME) return;
-        this.analyser.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-
-        if (average > this.SILENCE_THRESHOLD) {
-           this.hasSpoken = true;
-           this.consecutiveSilenceCount = 0;
-           if (this.silenceTimer) {
-             clearTimeout(this.silenceTimer);
-             this.silenceTimer = null;
-           }
-           if (onSpeechStart) onSpeechStart();
-        } else if (this.hasSpoken) {
-           this.consecutiveSilenceCount++;
-           if (this.consecutiveSilenceCount >= this.REQUIRED_SILENCE_CHECKS && !this.silenceTimer) {
-             this.silenceTimer = window.setTimeout(() => {
-               this.stopStreaming_Default();
-               onStopCallback();
-             }, this.SILENCE_DURATION);
-           }
-        }
-      }, 100);
-
+      // クライアント側 VAD は使用しない
+      // 無音検知は Gemini の automatic_activity_detection に完全に委任
+      // MAX_RECORDING_TIME のみ安全弁として残す
       this.recordingTimer = window.setTimeout(() => {
         this.stopStreaming_Default();
         onStopCallback();
