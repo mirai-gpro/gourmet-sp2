@@ -1,6 +1,3 @@
-"""
-設定・環境変数
-"""
 import os
 
 # Gemini

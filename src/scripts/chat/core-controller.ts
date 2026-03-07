@@ -7,8 +7,12 @@ export class CoreController {
   protected container: HTMLElement;
   protected apiBase: string;
   protected audioManager: AudioManager;
-  protected ws: WebSocket | null = null;
-  protected wsUrl: string = '';
+
+  // 🚨 LiveAPI WebSocket（Socket.IO を置き換え）
+  protected liveWs: WebSocket | null = null;
+
+  // 🚨 ストリーミングテキストバッファ（Gemini応答チャンクを蓄積）
+  protected responseBuffer: string = "";
 
   protected currentLanguage: 'ja' | 'en' | 'zh' | 'ko' = 'ja';
   protected sessionId: string | null = null;
@@ -21,12 +25,11 @@ export class CoreController {
   protected currentShops: any[] = [];
   protected isFromVoiceInput = false;
   protected lastAISpeech = '';
-  protected preGeneratedAcks: Map<string, string> = new Map();
   protected isAISpeaking = false;
   protected currentAISpeech = "";
-  protected currentMode: 'gourmet' | 'concierge' = 'gourmet';
+  protected currentMode: 'chat' | 'concierge' = 'chat';
 
-  // ★追加: バックグラウンド状態の追跡
+  // バックグラウンド状態の追跡
   protected isInBackground = false;
   protected backgroundStartTime = 0;
   protected readonly BACKGROUND_RESET_THRESHOLD = 120000; // 120秒
@@ -34,11 +37,8 @@ export class CoreController {
   protected isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
   protected isAndroid = /Android/i.test(navigator.userAgent);
 
-  // ★ 挨拶音声の遅延再生用（isUserInteracted=false時にバッファ — raw base64）
-  protected _pendingGreetingAudio: string | null = null;
-
   protected els: any = {};
-  protected ttsPlayer: HTMLAudioElement; // LAM avatar 連携用に維持
+  protected ttsPlayer: HTMLAudioElement;
 
   protected readonly LANGUAGE_CODE_MAP = {
     ja: { tts: 'ja-JP', stt: 'ja-JP', voice: 'ja-JP-Chirp3-HD-Leda' },
@@ -115,7 +115,7 @@ export class CoreController {
 
     if (oldSessionId) {
       try {
-        await fetch(`${this.apiBase}/api/v2/rest/cancel`, {
+        await fetch(`${this.apiBase}/api/v2/session/end`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: oldSessionId })
@@ -141,7 +141,7 @@ export class CoreController {
     this.currentShops = [];
     this.sessionId = null;
     this.lastAISpeech = '';
-    this.preGeneratedAcks.clear();
+    this.responseBuffer = "";
     this.isProcessing = false;
     this.isAISpeaking = false;
     this.isFromVoiceInput = false;
@@ -149,7 +149,6 @@ export class CoreController {
     await new Promise(resolve => setTimeout(resolve, 300));
     await this.initializeSession();
 
-    // ★追加: スクロール位置をリセット（ヘッダーが隠れないように）
     this.container.scrollIntoView({ behavior: 'smooth', block: 'start' });
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
@@ -191,26 +190,7 @@ export class CoreController {
     };
     document.addEventListener('gourmet-app:reset', resetWrapper, { once: true });
 
-    // ★修正: ブラウザ自動再生ポリシー対応
-    // ページ内のどこかをクリック/タッチ/キー入力した時点で音声を有効化
-    // （mic/speakerボタンだけでなく、Send/Enter/画面タップでも有効化）
-    const autoEnableAudio = () => {
-      if (!this.isUserInteracted) {
-        console.log('[Core] Auto-enabling audio on first user interaction');
-        this.enableAudioPlayback();
-        // 挨拶音声が保留中の場合は Web Audio API で再生
-        if (this._pendingGreetingAudio) {
-          console.log('[Core] Playing deferred greeting audio via Web Audio API');
-          this.audioManager.playMp3Audio(this._pendingGreetingAudio).catch(() => {});
-          this._pendingGreetingAudio = null;
-        }
-      }
-    };
-    document.addEventListener('click', autoEnableAudio, { once: true });
-    document.addEventListener('touchstart', autoEnableAudio, { once: true });
-    document.addEventListener('keydown', autoEnableAudio, { once: true });
-
-    // ★追加: バックグラウンド復帰時の復旧処理
+    // バックグラウンド復帰時の復旧処理
     document.addEventListener('visibilitychange', async () => {
       if (document.hidden) {
         this.isInBackground = true;
@@ -220,36 +200,24 @@ export class CoreController {
         const backgroundDuration = Date.now() - this.backgroundStartTime;
         console.log(`[Foreground] Resuming from background (${Math.round(backgroundDuration / 1000)}s)`);
 
-        // ★120秒以上バックグラウンドにいた場合はソフトリセット
+        // 120秒以上バックグラウンドにいた場合はソフトリセット
         if (backgroundDuration > this.BACKGROUND_RESET_THRESHOLD) {
           console.log('[Foreground] Long background duration - triggering soft reset...');
           await this.resetAppContent();
           return;
         }
 
-        // ★ v2: AudioContext の復帰 + 再生キューリセット
-        // iOS Safari ではバックグラウンドから戻ると AudioContext が suspended/interrupted になる
-        try {
-          this.audioManager.stopAll();
-          await this.audioManager.resumeAudioContext();
-          console.log('[Foreground] AudioContext resumed successfully');
-        } catch (e) {
-          console.warn('[Foreground] AudioContext resume failed, full reset...', e);
-          this.audioManager.fullResetAudioResources();
+        // 🚨 LiveAPI WebSocket 再接続チェック
+        if (!this.liveWs || this.liveWs.readyState !== WebSocket.OPEN) {
+          console.log('[Foreground] Reconnecting LiveAPI WebSocket...');
+          this.connectLiveAPI();
         }
 
-        // 1. WebSocket再接続（切断されていた場合）
-        if (this.ws && this.ws.readyState !== WebSocket.OPEN && this.wsUrl) {
-          console.log('[Foreground] Reconnecting WebSocket...');
-          this.initWebSocket(this.wsUrl);
-        }
-
-        // 2. UI状態をリセット（操作可能にする）
+        // UI状態をリセット（操作可能にする）
         this.isProcessing = false;
         this.isAISpeaking = false;
         this.hideWaitOverlay();
 
-        // 3. 要素が存在する場合のみ更新
         if (this.els.sendBtn) this.els.sendBtn.disabled = false;
         if (this.els.micBtn) this.els.micBtn.disabled = false;
         if (this.els.userInput) this.els.userInput.disabled = false;
@@ -261,72 +229,79 @@ export class CoreController {
     });
   }
 
-  // ★ WebSocket接続（Socket.IOから移行）
-  protected initWebSocket(wsUrl: string) {
-    // 既存のWebSocket接続を閉じる
-    if (this.ws) {
-      try { this.ws.close(); } catch (_e) {}
-    }
-
-    const backendUrl = this.container.dataset.backendUrl || window.location.origin;
-    this.wsUrl = wsUrl;
+  // 🚨 LiveAPI WebSocket 接続（Socket.IO initSocket を置き換え）
+  protected connectLiveAPI() {
+    const backendUrl = this.apiBase || window.location.origin;
     const wsProtocol = backendUrl.startsWith('https') ? 'wss' : 'ws';
     const wsHost = backendUrl.replace(/^https?:\/\//, '');
-    this.ws = new WebSocket(`${wsProtocol}://${wsHost}${wsUrl}`);
+    const url = `${wsProtocol}://${wsHost}/api/v2/live/${this.sessionId}`;
 
-    this.ws.onopen = () => {
-      console.log('[WS] Connected');
+    this.liveWs = new WebSocket(url);
+
+    this.liveWs.onopen = () => {
+      console.log('[LiveAPI] WebSocket connected');
     };
 
-    this.ws.onmessage = (event) => {
+    this.liveWs.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        this.handleWsMessage(msg);
+        this.handleLiveMessage(msg);
       } catch (e) {
-        console.error('[WS] Parse error:', e);
+        console.error('[LiveAPI] Parse error:', e);
       }
     };
 
-    this.ws.onclose = () => {
-      console.log('[WS] Disconnected');
+    this.liveWs.onclose = () => {
+      console.log('[LiveAPI] WebSocket disconnected');
+      this.liveWs = null;
     };
 
-    this.ws.onerror = (err) => {
-      console.error('[WS] Error:', err);
+    this.liveWs.onerror = (err) => {
+      console.error('[LiveAPI] WebSocket error:', err);
     };
   }
 
-  // ★ WebSocketメッセージ受信ハンドラ
-  protected handleWsMessage(msg: any) {
+  // 🚨 LiveAPI へメッセージ送信
+  protected sendToLive(msg: object) {
+    if (this.liveWs && this.liveWs.readyState === WebSocket.OPEN) {
+      this.liveWs.send(JSON.stringify(msg));
+    }
+  }
+
+  // 🚨 LiveAPI メッセージハンドラ
+  protected handleLiveMessage(msg: any) {
     switch (msg.type) {
-      case 'transcription':
-        if (msg.role === 'user') {
-          if (this.isAISpeaking) return;
-          if (msg.is_partial) {
-            this.els.userInput.value = msg.text;
-          } else {
-            this.handleStreamingSTTComplete(msg.text);
-            this.currentAISpeech = "";
-          }
-        } else if (msg.role === 'ai') {
-          this.hideWaitOverlay();
-          if (msg.is_partial) {
-            // ストリーミング表示: 部分テキストを追記
-            this.updateStreamingMessage('assistant', msg.text);
-          } else {
-            // 確定: バッファクリア → 確定テキストに置換
-            this.finalizeStreamingMessage('assistant', msg.text);
-            this.currentAISpeech = msg.text;
-            this.resetInputState();
-          }
-        }
+      case 'connected':
+        console.log('[LiveAPI] Gemini session ready');
         break;
-      case 'shop_cards':
+
+      case 'text':
+        // 🚨 Geminiからのテキストストリーミング — チャンクごとに呼ばれる
+        this.hideWaitOverlay();
+        this.responseBuffer += msg.text;
+        this.updateStreamingMessage('assistant', this.responseBuffer);
+        break;
+
+      case 'turn_complete':
+        // 🚨 Geminiの応答完了
+        if (this.responseBuffer) {
+          this.finalizeStreamingMessage('assistant', this.responseBuffer);
+          // REST TTS で音声合成・再生
+          if (this.isTTSEnabled) {
+            this.speakTextGCP(this.responseBuffer);
+          }
+          this.responseBuffer = "";
+        }
+        this.isAISpeaking = false;
+        this.resetInputState();
+        break;
+
+      case 'shop_data':
+        // 🚨 ショップ検索結果（tool_call実行後）
         this.hideWaitOverlay();
         if (msg.shops && msg.shops.length > 0) {
           this.currentShops = msg.shops;
           this.els.reservationBtn.classList.add('visible');
-          this.els.userInput.value = '';
           document.dispatchEvent(new CustomEvent('displayShops', {
             detail: { shops: msg.shops, language: this.currentLanguage }
           }));
@@ -339,124 +314,43 @@ export class CoreController {
             }, 300);
           }
         }
-        if (msg.response) {
-          this.currentAISpeech = msg.response;
-          this.addMessage('assistant', msg.response);
-        }
-        this.resetInputState();
+        // 🚨 ショップ紹介テキストはこの後の text チャンクで届く
+        // 🚨 ここでは resetInputState() しない（テキスト応答を待つ）
         break;
-      case 'audio':
-        // ★ v2: AI音声（PCM 24kHz base64）→ キュー方式でギャップレス再生
-        // 複数チャンクが連続で来るので、.then() で isAISpeaking=false にしない
-        // → isAISpeaking は turn_complete / interrupted で制御
-        console.log(`[Core] WS audio received: ${msg.data?.length || 0} chars`);
-        this.isAISpeaking = true;
-        if (this.isRecording) this.stopStreamingSTT();
-        this.hideWaitOverlay();
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-        this.els.voiceStatus.className = 'voice-status speaking';
-        if (this.isUserInteracted) {
-          this.audioManager.playPcmAudio(msg.data).catch(() => {});
-        }
-        break;
-      case 'rest_audio':
-        // TTS音声（MP3 base64）→ Web Audio API で再生
-        this.isAISpeaking = true;
-        if (this.isRecording) this.stopStreamingSTT();
-        if (msg.text) this.lastAISpeech = this.normalizeText(msg.text);
-        this.stopCurrentAudio();
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
-        this.els.voiceStatus.className = 'voice-status speaking';
-        if (this.isUserInteracted) {
-          this.audioManager.playMp3Audio(msg.data).then(() => {
-            this.isAISpeaking = false;
-            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-            this.els.voiceStatus.className = 'voice-status stopped';
-          }).catch(() => { this.isAISpeaking = false; });
-        } else {
-          this.isAISpeaking = false;
-        }
-        break;
-      case 'interrupted':
-        // ★ v2: サーバーからの interrupted で全停止 + UI復帰
-        this.stopCurrentAudio();
-        this.isAISpeaking = false;
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        break;
-      case 'turn_complete':
-        // ★ v2: ターン完了でAI発話状態を解除（ギャップレス再生の最終同期ポイント）
-        this.isAISpeaking = false;
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        this.resetInputState();
-        break;
+
       case 'error':
-        this.addMessage('system', `${this.t('sttError')} ${msg.message}`);
-        if (this.isRecording) this.stopStreamingSTT();
+        this.addMessage('system', msg.message || 'エラーが発生しました');
         this.hideWaitOverlay();
         this.resetInputState();
         break;
-      case 'reconnecting':
-        console.log('[WS] Reconnecting:', msg.reason);
-        this.showReconnectingUI();
-        break;
-      case 'reconnected':
-        console.log('[WS] Reconnected, session count:', msg.session_count);
-        this.hideReconnectingUI();
-        break;
     }
   }
 
-  // ★ WebSocket送信ヘルパー
-  protected wsSend(msg: object) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+  // ストリーミングメッセージの更新表示
+  protected updateStreamingMessage(_role: string, text: string) {
+    let streamingEl = this.els.chatArea.querySelector('.message.assistant.streaming');
+    if (!streamingEl) {
+      streamingEl = document.createElement('div');
+      streamingEl.className = 'message assistant streaming';
+      streamingEl.innerHTML = `<div class="message-avatar">🍽</div><div class="message-content"><span class="message-text"></span></div>`;
+      this.els.chatArea.appendChild(streamingEl);
     }
+    const textEl = streamingEl.querySelector('.message-text');
+    if (textEl) textEl.textContent = text;
+    this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
   }
 
-  // ストリーミング中のメッセージを更新（末尾の吹き出しに追記）
-  protected updateStreamingMessage(role: string, partialText: string) {
-    const messages = this.els.chatArea.querySelectorAll(`.message.${role}`);
-    const lastMsg = messages[messages.length - 1];
-    if (lastMsg && lastMsg.classList.contains('streaming')) {
-      const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
-      if (content) content.textContent = partialText;
-    } else {
-      this.addMessage(role, partialText);
-      const newMessages = this.els.chatArea.querySelectorAll(`.message.${role}`);
-      const newMsg = newMessages[newMessages.length - 1];
-      if (newMsg) newMsg.classList.add('streaming');
+  // ストリーミングメッセージの確定
+  protected finalizeStreamingMessage(_role: string, _text: string) {
+    const streamingEl = this.els.chatArea.querySelector('.message.assistant.streaming');
+    if (streamingEl) {
+      streamingEl.classList.remove('streaming');
     }
-  }
-
-  // ストリーミング完了 → 確定テキストに置換
-  protected finalizeStreamingMessage(role: string, finalText: string) {
-    const messages = this.els.chatArea.querySelectorAll(`.message.${role}`);
-    const lastMsg = messages[messages.length - 1];
-    if (lastMsg && lastMsg.classList.contains('streaming')) {
-      const content = lastMsg.querySelector('.message-content') || lastMsg.querySelector('.message-text');
-      if (content) content.textContent = finalText;
-      lastMsg.classList.remove('streaming');
-    } else {
-      this.addMessage(role, finalText);
-    }
-  }
-
-  // 再接続中UI表示
-  protected showReconnectingUI() {
-    this.els.voiceStatus.innerHTML = this.t('reconnecting') || '接続中...';
-    this.els.voiceStatus.className = 'voice-status reconnecting';
-  }
-
-  // 再接続完了UI復帰
-  protected hideReconnectingUI() {
-    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-    this.els.voiceStatus.className = 'voice-status stopped';
   }
 
   protected async initializeSession() {
     try {
+      // 旧セッション終了
       if (this.sessionId) {
         try {
           await fetch(`${this.apiBase}/api/v2/session/end`, {
@@ -467,47 +361,31 @@ export class CoreController {
         } catch (e) {}
       }
 
-      // ★ 既存WebSocket接続を閉じる
-      if (this.ws) {
-        try { this.ws.close(); } catch (_e) {}
-        this.ws = null;
+      // 🚨 既存 LiveAPI WebSocket を閉じる
+      if (this.liveWs) {
+        try { this.liveWs.close(); } catch (_e) {}
+        this.liveWs = null;
       }
 
-      const sessionPayload = {
-        mode: this.currentMode,
-        language: this.currentLanguage,
-        dialogue_type: 'live',
-        user_id: this.getUserId()
-      };
-      console.log('[Core] session/start request:', JSON.stringify(sessionPayload));
+      // session/start リクエスト
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sessionPayload)
+        body: JSON.stringify({
+          mode: this.currentMode,
+          language: this.currentLanguage,
+        })
       });
-      if (!res.ok) {
-        const errBody = await res.text();
-        console.error(`[Core] session/start failed: ${res.status} ${res.statusText}`, errBody);
-        throw new Error(`session/start failed: ${res.status}`);
-      }
       const data = await res.json();
-      console.log('[Core] session/start response:', JSON.stringify({ session_id: data.session_id, mode: data.mode, ws_url: data.ws_url }));
       this.sessionId = data.session_id;
 
-      // ★ WebSocket接続（session_id取得後）
-      if (data.ws_url) {
-        this.initWebSocket(data.ws_url);
-      }
+      // 🚨 LiveAPI WebSocket 接続（session_id から URL を構築）
+      this.connectLiveAPI();
 
-      this.addMessage('assistant', this.t('initialGreeting'), null, true);
+      // 挨拶表示
+      this.addMessage('assistant', data.initial_message || this.t('initialGreeting'), null, true);
 
-      const ackTexts = [
-        this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
-        this.t('ackYes'), this.t('ttsIntro')
-      ];
-      const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
-
-      // ★修正: UI即時有効化（TTS完了を待たない）
+      // UI 有効化
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
@@ -515,28 +393,10 @@ export class CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ 挨拶音声: session/start レスポンスに同梱されていれば即再生（TTS不要）
-      const playGreeting = data.greeting_audio
-        ? this.playGreetingAudioDirect(data.greeting_audio)
-        : this.speakTextGCP(this.t('initialGreeting'));
-      playGreeting.then(() => {
-        const ackPreGen = ackTexts.map(async (text) => {
-          try {
-            const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                text: text, language_code: langConfig.tts, voice_name: langConfig.voice
-              })
-            });
-            const ackData = await ackResponse.json();
-            if (ackData.success && ackData.audio) {
-              this.preGeneratedAcks.set(text, ackData.audio);
-            }
-          } catch (_e) { }
-        });
-        Promise.all(ackPreGen).catch(() => {});
-      }).catch(() => {});
+      // 挨拶音声（REST TTS）
+      if (this.isTTSEnabled) {
+        this.speakTextGCP(data.initial_message || this.t('initialGreeting'));
+      }
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
@@ -552,15 +412,7 @@ export class CoreController {
       return;
     }
 
-    if (this.isProcessing || this.isAISpeaking || this.audioManager.isPlaying) {
-      if (this.isProcessing) {
-        fetch(`${this.apiBase}/api/v2/rest/cancel`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: this.sessionId })
-        }).catch(err => console.error('中止リクエスト失敗:', err));
-      }
-
+    if (this.isProcessing || this.isAISpeaking || !this.ttsPlayer.paused) {
       this.stopCurrentAudio();
       this.hideWaitOverlay();
       this.isProcessing = false;
@@ -568,28 +420,8 @@ export class CoreController {
       this.resetInputState();
     }
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.isRecording = true;
-      this.els.micBtn.classList.add('recording');
-      this.els.voiceStatus.innerHTML = this.t('voiceStatusListening');
-      this.els.voiceStatus.className = 'voice-status listening';
-
-      try {
-        const langCode = this.LANGUAGE_CODE_MAP[this.currentLanguage].stt;
-        await this.audioManager.startStreaming(
-          this.ws, langCode,
-          () => { this.stopStreamingSTT(); },
-          () => { this.els.voiceStatus.innerHTML = this.t('voiceStatusRecording'); }
-        );
-      } catch (error: any) {
-        this.stopStreamingSTT();
-        if (!error.message?.includes('マイク')) {
-          this.showError(this.t('micAccessError'));
-        }
-      }
-    } else {
-      await this.startLegacyRecording();
-    }
+    // フェーズ1: 音声入力はレガシー録音のみ維持
+    await this.startLegacyRecording();
   }
 
   protected async startLegacyRecording() {
@@ -617,111 +449,47 @@ export class CoreController {
 
   protected stopStreamingSTT() {
     this.audioManager.stopStreaming();
-    // stop_stream 不要: 音声チャンク送信を止めればバックエンドが自動的にSTT完了を検知
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
     this.els.voiceStatus.className = 'voice-status stopped';
   }
 
-  // ★ Live API修正: 音声は既にGeminiに送信・処理済み
-  // turn_completeでaudio/transcriptionが自動的に到着するため、テキスト再送信は不要
-  protected async handleStreamingSTTComplete(transcript: string) {
-    this.stopStreamingSTT();
-
-    if ('mediaSession' in navigator) {
-      try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
-    }
-
-    const normTranscript = this.normalizeText(transcript);
-    if (this.isSemanticEcho(normTranscript, this.lastAISpeech)) {
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        this.lastAISpeech = '';
-        return;
-    }
-
-    // ユーザー発言を表示
-    this.addMessage('user', transcript);
-    this.els.userInput.value = '';
-
-    console.log('[Core] Voice transcript received (Live API), waiting for response from turn_complete');
-
-    // ★ Live API: テキスト再送信しない
-    // Geminiは音声入力を既に処理済み → turn_completeでaudio+transcriptionが到着する
-    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-    this.els.voiceStatus.className = 'voice-status stopped';
-    this.isProcessing = true;
-
-    if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
-    this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 4000);
-  }
-
-// Part 1からの続き...
-
+  // 🚨 大幅簡略化 — ACK/fallback/additionalResponse を全て削除
   protected async sendMessage() {
-    let firstAckPromise: Promise<void> | null = null;
-    // ★修正: テキスト送信もユーザー操作なので isUserInteracted を有効化
-    // （Send ボタン / Enter キー経由時に音声再生が無効のままになるバグを防止）
     this.enableAudioPlayback();
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
 
-    const isTextInput = !this.isFromVoiceInput;
+    // 1. ユーザーメッセージ表示
+    this.addMessage('user', message);
+    this.els.userInput.value = '';
 
+    // 2. 入力無効化
     this.isProcessing = true;
     this.els.sendBtn.disabled = true;
     this.els.micBtn.disabled = true;
     this.els.userInput.disabled = true;
 
-    if (!this.isFromVoiceInput) {
-      this.addMessage('user', message);
-      const textLength = message.trim().replace(/\s+/g, '').length;
-      if (textLength < 2) {
-           const msg = this.t('shortMsgWarning');
-           this.addMessage('assistant', msg);
-           if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(msg, true);
-           this.resetInputState();
-           return;
-      }
-
-      this.els.userInput.value = '';
-
-      const ack = this.selectSmartAcknowledgment(message);
-      this.currentAISpeech = ack.text;
-      this.addMessage('assistant', ack.text);
-
-      if (this.isTTSEnabled && !isTextInput) {
-        try {
-          const preGeneratedAudio = this.preGeneratedAcks.get(ack.text);
-          if (preGeneratedAudio && this.isUserInteracted) {
-            this.lastAISpeech = this.normalizeText(ack.text);
-            firstAckPromise = this.audioManager.playMp3Audio(preGeneratedAudio);
-          } else {
-            firstAckPromise = this.speakTextGCP(ack.text, false);
-          }
-        } catch (_e) {}
-      }
-      if (firstAckPromise) await firstAckPromise;
-    }
-
-    this.isFromVoiceInput = false;
-
+    // 3. 待機アニメーション
     if (this.waitOverlayTimer) clearTimeout(this.waitOverlayTimer);
     this.waitOverlayTimer = window.setTimeout(() => { this.showWaitOverlay(); }, 4000);
 
-    // ★ WebSocket経由でテキスト送信（バックエンド仕様準拠）
-    this.wsSend({ type: 'text', data: message });
+    // 4. 🚨 WebSocket でテキスト送信（REST /api/chat は使わない）
+    this.sendToLive({ type: 'text', text: message });
+    //                               ^^^^
+    // 🚨 フィールド名は "text"。"data" ではない。
+
     this.els.userInput.blur();
-    // レスポンスは handleWsMessage() で処理
+    // レスポンスは handleLiveMessage() で処理
   }
 
   protected async speakTextGCP(text: string, stopPrevious: boolean = true, autoRestartMic: boolean = false, skipAudio: boolean = false) {
     if (skipAudio) return Promise.resolve();
     if (!this.isTTSEnabled || !text) return Promise.resolve();
 
-    if (stopPrevious) {
-      this.stopCurrentAudio();
+    if (stopPrevious && this.isTTSEnabled) {
+      this.ttsPlayer.pause();
     }
 
     const cleanText = this.stripMarkdown(text);
@@ -735,6 +503,7 @@ export class CoreController {
       this.els.voiceStatus.className = 'voice-status speaking';
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
+      // 🚨 REST TTS エンドポイント（/api/v2/rest/tts/synthesize）
       const response = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -744,20 +513,31 @@ export class CoreController {
       });
       const data = await response.json();
       if (data.success && data.audio) {
+        this.ttsPlayer.src = `data:audio/mp3;base64,${data.audio}`;
+        const playPromise = new Promise<void>((resolve) => {
+          this.ttsPlayer.onended = async () => {
+            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+            this.els.voiceStatus.className = 'voice-status stopped';
+            this.isAISpeaking = false;
+            if (autoRestartMic) {
+              if (!this.isRecording) {
+                try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
+              }
+            }
+            resolve();
+          };
+          this.ttsPlayer.onerror = () => {
+            this.isAISpeaking = false;
+            resolve();
+          };
+        });
+
         if (this.isUserInteracted) {
           this.lastAISpeech = this.normalizeText(cleanText);
-          // ★ Web Audio API で再生（iOS 受話口問題の解消）
-          await this.audioManager.playMp3Audio(data.audio);
-          this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-          this.els.voiceStatus.className = 'voice-status stopped';
-          this.isAISpeaking = false;
-          if (autoRestartMic && !this.isRecording) {
-            try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
-          }
+          await this.ttsPlayer.play();
+          await playPromise;
         } else {
-          // ★ 挨拶音声を保留（raw base64）、初回操作時に audioManager.playMp3Audio で再生
-          console.log('[Core] Audio deferred: isUserInteracted=false, saving for later');
-          this._pendingGreetingAudio = data.audio;
+          this.showClickPrompt();
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
@@ -794,45 +574,10 @@ export class CoreController {
       const clickPrompt = this.container.querySelector('.click-prompt');
       if (clickPrompt) clickPrompt.remove();
       this.unlockAudioParams();
-      // AudioContext を事前ウォームアップ（ユーザージェスチャーコンテキストで）
-      this.audioManager.ensureAudioContext().catch(() => {});
-    }
-  }
-
-  protected async playGreetingAudioDirect(audioBase64: string): Promise<void> {
-    /**
-     * session/start レスポンスに同梱された挨拶音声を直接再生（追加TTSリクエスト不要）
-     */
-    if (!this.isTTSEnabled || !audioBase64) return;
-
-    try {
-      this.isAISpeaking = true;
-      this.els.voiceStatus.innerHTML = this.t('voiceStatusSynthesizing');
-      this.els.voiceStatus.className = 'voice-status speaking';
-
-      if (this.isUserInteracted) {
-        await this.audioManager.playMp3Audio(audioBase64);
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        this.isAISpeaking = false;
-      } else {
-        console.log('[Core] Greeting audio deferred: isUserInteracted=false');
-        this._pendingGreetingAudio = audioBase64;
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        this.isAISpeaking = false;
-      }
-    } catch (_error) {
-      this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-      this.els.voiceStatus.className = 'voice-status stopped';
-      this.isAISpeaking = false;
     }
   }
 
   protected stopCurrentAudio() {
-    // Web Audio API 再生を停止
-    this.audioManager.stopPlayback();
-    // LAM avatar 連携用 ttsPlayer も停止
     this.ttsPlayer.pause();
     this.ttsPlayer.currentTime = 0;
   }
@@ -879,26 +624,6 @@ export class CoreController {
     return text.replace(/\s+/g, '').replace(/[、。！？,.!?]/g, '').toLowerCase();
   }
 
-  protected removeFillers(text: string): string {
-    // @ts-ignore
-    const pattern = i18n[this.currentLanguage].patterns.fillers;
-    return text.replace(pattern, '');
-  }
-
-  protected generateFallbackResponse(text: string): string {
-    return this.t('fallbackResponse', text);
-  }
-
-  protected selectSmartAcknowledgment(userMessage: string) {
-    const messageLower = userMessage.trim();
-    // @ts-ignore
-    const p = i18n[this.currentLanguage].patterns;
-    if (p.ackQuestions.test(messageLower)) return { text: this.t('ackConfirm'), logText: `質問形式` };
-    if (p.ackLocation.test(messageLower)) return { text: this.t('ackSearch'), logText: `場所` };
-    if (p.ackSearch.test(messageLower)) return { text: this.t('ackUnderstood'), logText: `検索` };
-    return { text: this.t('ackYes'), logText: `デフォルト` };
-  }
-
   protected isSemanticEcho(transcript: string, aiText: string): boolean {
     if (!aiText || !transcript) return false;
     const normTranscript = this.normalizeText(transcript);
@@ -906,22 +631,6 @@ export class CoreController {
     if (normAI === normTranscript) return true;
     if (normAI.includes(normTranscript) && normTranscript.length > 5) return true;
     return false;
-  }
-
-  protected extractShopsFromResponse(text: string): any[] {
-    const shops: any[] = [];
-    const pattern = /(\d+)\.\s*\*\*([^*]+)\*\*[::\s]*([^\n]+)/g;
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      const fullName = match[2].trim();
-      const description = match[3].trim();
-      let name = fullName;
-      const nameMatch = fullName.match(/^([^(]+)[(]([^)]+)[)]/);
-      if (nameMatch) name = nameMatch[1].trim();
-      const encodedName = encodeURIComponent(name);
-      shops.push({ name: name, description: description, category: 'イタリアン', hotpepper_url: `https://www.hotpepper.jp/SA11/srchRS/?keyword=${encodedName}`, maps_url: `https://www.google.com/maps/search/${encodedName}`, tabelog_url: `https://tabelog.com/rstLst/?vs=1&sa=&sk=${encodedName}` });
-    }
-    return shops;
   }
 
   protected openReservationModal() {
@@ -945,26 +654,22 @@ export class CoreController {
   }
 
   protected stopAllActivities() {
-    if (this.isProcessing) {
-      fetch(`${this.apiBase}/api/v2/rest/cancel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: this.sessionId })
-      }).catch(err => console.error('中止リクエスト失敗:', err));
-    }
-
     this.audioManager.fullResetAudioResources();
     this.isRecording = false;
     this.els.micBtn.classList.remove('recording');
+
+    // 🚨 LiveAPI WebSocket で close メッセージ送信
+    this.sendToLive({ type: 'close' });
+
     this.stopCurrentAudio();
     this.hideWaitOverlay();
     this.isProcessing = false;
     this.isAISpeaking = false;
+    this.responseBuffer = "";
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
     this.els.voiceStatus.className = 'voice-status stopped';
     this.els.userInput.value = '';
 
-    // ★修正: containerにスクロール（chat-header-controlsが隠れないように）
     if (window.innerWidth < 1024) {
       setTimeout(() => { this.container.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 100);
     }

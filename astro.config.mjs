@@ -33,22 +33,13 @@ export default defineConfig({
         'Cross-Origin-Opener-Policy': 'same-origin',
         'Cross-Origin-Embedder-Policy': 'require-corp',
       },
-      // ★ ローカル開発用: vercel.json のリライトはVercel上でしか効かないため
-      //    Vite dev serverで /api/v2/ と /socket.io/ をバックエンドにプロキシ
+      // ローカル開発用: vercel.json のリライトはVercel上でしか効かないため
+      //    Vite dev serverで /api/v2/ をバックエンドにプロキシ
       proxy: isDev ? {
         '/api/v2': {
           target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
           changeOrigin: true,
-          ws: true,  // LiveAPI WebSocket対応
-        },
-        '/api/stt': {
-          target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
-          changeOrigin: true,
-        },
-        '/socket.io': {
-          target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
-          changeOrigin: true,
-          ws: true,  // WebSocket対応
+          ws: true,  // 🚨 LiveAPI WebSocket 対応に必須
         },
       } : undefined,
     },

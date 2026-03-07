@@ -127,14 +127,6 @@ import {
   ARKIT_CHANNEL_NAMES
 } from '../scripts/lam/lam-websocket-manager';
 
-// ============================================================
-// Phase 0-3: WebGL Shader Intercept — 完了・削除済み (2026-02-24)
-// 結果: bsCount=51, gaussianSplatCount=20018, useFlame=false,
-//       headBoneIndex=110, SDK全51chブレンドシェイプ対応を確認
-// キャプチャしたシェーダー: docs/captured_shader_2.glsl
-// SDK JS 解析: services/frontend-patches/gaussian-splat-renderer-for-lam.module.js
-// ============================================================
-
 type ChatState = 'Idle' | 'Listening' | 'Thinking' | 'Responding';
 
 function createDefaultExpressionData(): ExpressionData {
@@ -172,16 +164,6 @@ class LAMAvatarController {
   private ttsEndedHandler: (() => void) | null = null;
   private ttsActive: boolean = false;
   private ttsLastCurrentTime: number = 0;
-  private ttsTransitioning: boolean = false; // TTS切替中フラグ（早期fade-out防止）
-
-  // Live API real-time sync (ttsPlayerを使わないケース)
-  private liveStreamStartTime: number | null = null;
-  private liveStreamConsumedIndex: number = 0;
-  // AudioContext ベースのフレーム同期（performance.now() の代わり）
-  private liveAudioTimeGetter: (() => number) | null = null;
-  private _lastLiveFrameIndex: number = -1;
-  private _liveStallStart: number | null = null;
-  private liveStreamIsFinal: boolean = false;
 
   // Frame buffer for expression
   private frameBuffer: ExpressionData[] = [];
@@ -208,18 +190,9 @@ class LAMAvatarController {
 
       // Health check (10s interval)
       setInterval(() => {
-        const f = this.expressionData;
-        const jaw = f['jawOpen'] || 0;
-        const mouth = f['mouthLowerDownLeft'] || 0;
-        const funnel = f['mouthFunnel'] || 0;
-        const smile = f['mouthSmileLeft'] || 0;
-        const pucker = f['mouthPucker'] || 0;
-        console.log(
-          `[LAM Health] state=${this.currentState}, ` +
-          `jaw=${jaw.toFixed(3)}, mouth=${mouth.toFixed(3)}, ` +
-          `funnel=${funnel.toFixed(3)}, smile=${smile.toFixed(3)}, pucker=${pucker.toFixed(3)}, ` +
-          `buffer=${this.frameBuffer.length}, ttsActive=${this.ttsActive}`
-        );
+        const jaw = this.expressionData['jawOpen'] || 0;
+        const mouth = this.expressionData['mouthLowerDownLeft'] || 0;
+        console.log(`[LAM Health] state=${this.currentState}, jaw=${jaw.toFixed(3)}, mouth=${mouth.toFixed(3)}, buffer=${this.frameBuffer.length}, ttsActive=${this.ttsActive}`);
       }, 10000);
 
       if (this.autoConnect && this.wsUrl) {
@@ -250,7 +223,6 @@ class LAMAvatarController {
     this.ttsPlayHandler = () => {
       console.log(`[LAM External] TTS play - frameBuffer has ${this.frameBuffer.length} frames`);
       this.ttsActive = true;
-      this.ttsTransitioning = false; // TTS切替完了
       this.ttsLastCurrentTime = player.currentTime;
     };
 
@@ -270,15 +242,6 @@ class LAMAvatarController {
 
     this.externalTtsLinked = true;
     console.log('[LAM Avatar] External TTS player linked');
-  }
-
-  /**
-   * Live API 音声同期: AudioContext.currentTime ベースの再生時間取得関数を設定
-   * これにより performance.now() ではなく実際の音声再生位置でフレームを進行させる
-   */
-  public setLiveAudioTimeGetter(getter: () => number): void {
-    this.liveAudioTimeGetter = getter;
-    console.log('[LAM Avatar] Live audio time getter set');
   }
 
   public setSyncMode(mode: 'bundled' | 'external'): void {
@@ -335,9 +298,6 @@ class LAMAvatarController {
       this.isInitialized = true;
       this.showCanvas();
       console.log('LAM Avatar initialized successfully');
-
-      // ★ SDK内部情報のデバッグ出力
-      this.logSdkInternals();
 
       if (this.testMode) {
         console.log('[LAM TEST] Test mode enabled - looping test_expression_1s.json');
@@ -439,167 +399,12 @@ class LAMAvatarController {
   private getExpCallCount = 0;
   private lastLoggedFrameIndex = -1;
 
-  // FLAME LBS 安全上限。これを超えるとメッシュ数値爆発
-  private static readonly SAFE_MAX = 0.7;
-  // 旧2ch制限の口の動き上限（SDK全52ch対応判明により不要 → JAW_MAX/MOUTH_MAXは未使用）
-  // private static readonly JAW_MAX = 0.30;
-  // private static readonly MOUTH_MAX = 0.20;
-  private sdkInfoLogged = false; // SDK内部情報のワンタイムログ
-
-  /**
-   * SDK 内部情報をログ出力（初回のみ）
-   * morphTargetDictionary, bsCount, useFlame 等を確認
-   */
-  private logSdkInternals(): void {
-    if (this.sdkInfoLogged) return;
-    this.sdkInfoLogged = true;
-
-    try {
-      const r = this.renderer;
-      console.log('=== SDK INTERNALS ===');
-      console.log(`[SDK] useFlame = ${r?.useFlame}`);
-      console.log(`[SDK] viewer.useFlame = ${r?.viewer?.useFlame}`);
-
-      const splatMesh = r?.viewer?.splatMesh;
-      if (splatMesh) {
-        console.log(`[SDK] expressionBSNum = ${splatMesh.expressionBSNum}`);
-        console.log(`[SDK] gaussianSplatCount = ${splatMesh.gaussianSplatCount}`);
-        console.log(`[SDK] useFlameModel = ${splatMesh.useFlameModel}`);
-
-        const dict = splatMesh.morphTargetDictionary;
-        if (dict) {
-          const keys = Object.keys(dict);
-          console.log(`[SDK] morphTargetDictionary: ${keys.length} entries`);
-          keys.forEach((k, i) => {
-            console.log(`[SDK]   [${dict[k]}] ${k}`);
-          });
-        } else {
-          console.log('[SDK] morphTargetDictionary: null (not yet built)');
-        }
-
-        // bsCount uniform
-        const bsCount = splatMesh.material?.uniforms?.bsCount?.value;
-        console.log(`[SDK] bsCount uniform = ${bsCount}`);
-
-        // boneTexture size
-        const boneTexSize = splatMesh.material?.uniforms?.boneTextureSize?.value;
-        console.log(`[SDK] boneTextureSize = ${boneTexSize?.x}x${boneTexSize?.y}`);
-
-        // flameModelTexture size
-        const flameTexSize = splatMesh.material?.uniforms?.flameModelTextureSize?.value;
-        console.log(`[SDK] flameModelTextureSize = ${flameTexSize?.x}x${flameTexSize?.y}`);
-      }
-      console.log('=== END SDK INTERNALS ===');
-
-      // ★ 遅延診断: モデルロード完了後にmorphTargetDictionaryが構築されるか確認
-      // expressionBSNum=0 の場合、audio2expが動いてもリップシンクは反映されない
-      const delayChecks = [3000, 8000, 15000];
-      delayChecks.forEach((delay) => {
-        setTimeout(() => {
-          const mesh = this.renderer?.viewer?.splatMesh;
-          if (!mesh) return;
-          const bs = mesh.expressionBSNum;
-          const dict = mesh.morphTargetDictionary;
-          const bsU = mesh.material?.uniforms?.bsCount?.value;
-          const dictCount = dict ? Object.keys(dict).length : 0;
-          console.log(
-            `[SDK DELAYED ${delay / 1000}s] expressionBSNum=${bs}, ` +
-            `morphTargetDictionary=${dictCount} entries, bsCount=${bsU}`
-          );
-          if (dict && dictCount > 0 && !this._delayedDictLogged) {
-            this._delayedDictLogged = true;
-            Object.keys(dict).forEach((k) => {
-              console.log(`[SDK DELAYED]   [${dict[k]}] ${k}`);
-            });
-          }
-        }, delay);
-      });
-    } catch (e) {
-      console.warn('[SDK] Failed to log internals:', e);
-    }
-  }
-
-  private _delayedDictLogged = false;
-
-  /**
-   * SDK汚染対策: SDKが返却オブジェクトにFLAME LBS計算結果を書き戻す場合、
-   * 数値爆発した値(jaw=5億等)がフィードバックループで蓄積する。
-   * 毎フレーム開始時にサニタイズして断ち切る。
-   */
-  private sanitizeExpressionData(): void {
-    for (const key of Object.keys(this.expressionData)) {
-      const v = this.expressionData[key];
-      if (typeof v !== 'number' || !isFinite(v) || v > 1.0 || v < -1.0) {
-        this.expressionData[key] = 0;
-      }
-    }
-  }
-
-  /**
-   * SDKにexpression dataの安全なコピーを返す。
-   * SDKが書き戻してもthis.expressionDataを汚染しない。
-   */
-  private safeReturnExpression(): ExpressionData {
-    return { ...this.expressionData };
-  }
-
-  /**
-   * SDK制約の回避: 母音チャンネル → jawOpen/lowerDown 合成
-   *
-   * gaussian-splat-renderer-for-lam SDK は jawOpen と mouthLowerDown の
-   * 2値しか FLAME メッシュ変形に使わない（__testLipSync() 診断で確認済み）。
-   * 他の母音チャンネル（smile, funnel, pucker, stretch）の情報を
-   * この2チャンネルに合成して、母音の口形状差を近似的に表現する。
-   *
-   * ※重みは控えめに設定（女性キャラの自然な口の動き範囲に収める）
-   */
-  private remapForSdkLimitation(data: ExpressionData): ExpressionData {
-    const jaw = data['jawOpen'] || 0;
-    const lowerDownL = data['mouthLowerDownLeft'] || 0;
-    const lowerDownR = data['mouthLowerDownRight'] || 0;
-    const lowerDown = (lowerDownL + lowerDownR) * 0.5;
-    const funnel = data['mouthFunnel'] || 0;
-    const pucker = data['mouthPucker'] || 0;
-    const smile = ((data['mouthSmileLeft'] || 0) + (data['mouthSmileRight'] || 0)) * 0.5;
-    const stretch = ((data['mouthStretchLeft'] || 0) + (data['mouthStretchRight'] || 0)) * 0.5;
-
-    // jawOpen 合成: 母音チャンネルの寄与を加算し、JAW_MAXでキャップ
-    const compositeJaw = Math.min(LAMAvatarController.JAW_MAX,
-      jaw
-      + smile * 0.3
-      + funnel * 0.2
-      + pucker * 0.12
-      + stretch * 0.2
-    );
-
-    // mouthLowerDown 合成: 母音特性を下唇の動きに変換、MOUTH_MAXでキャップ
-    const compositeLowerDown = Math.min(LAMAvatarController.MOUTH_MAX,
-      Math.max(0,
-        lowerDown
-        + smile * 0.2
-        + stretch * 0.15
-        - pucker * 0.1
-      )
-    );
-
-    data['jawOpen'] = compositeJaw;
-    data['mouthLowerDownLeft'] = compositeLowerDown;
-    data['mouthLowerDownRight'] = compositeLowerDown;
-
-    return data;
-  }
-
   /**
    * Called by renderer at ~60fps
    * Returns expression data based on TTS player currentTime
    */
   public getExpressionData() {
     this.getExpCallCount++;
-
-    // ★ SDK汚染対策: SDKが前フレームの返却オブジェクト経由で
-    //   FLAME LBS の計算結果を書き戻す場合がある（jaw=5億等）。
-    //   フィードバックループを断ち切るため毎フレーム開始時にサニタイズ。
-    this.sanitizeExpressionData();
 
     // Test mode: loop test data
     if (this.testMode && this.testBsData) {
@@ -618,128 +423,7 @@ class LAMAvatarController {
         const jaw = this.expressionData['jawOpen'] || 0;
         console.log(`[LAM TEST] Frame ${frameIndex}/${length}: jaw=${jaw.toFixed(3)}`);
       }
-      return this.safeReturnExpression();
-    }
-
-    // Live API sync: AudioContext ベースの音声再生時間でフレーム進行
-    // ★ performance.now() ではなく実際の音声再生位置を使う
-    // AudioContext.currentTime はハードウェアクロック同期で、
-    // スケジュール済み音声の末端でキャップされるため
-    // 音声終了後にフレームが進行し続ける問題を防ぐ
-    if (this.liveStreamStartTime !== null && this.frameBuffer.length > 0) {
-      let elapsedMs: number;
-      if (this.liveAudioTimeGetter) {
-        // AudioContext ベース: 実際の音声再生位置に同期
-        elapsedMs = this.liveAudioTimeGetter() * 1000;
-      } else {
-        // フォールバック: wall clock
-        elapsedMs = performance.now() - this.liveStreamStartTime;
-      }
-      const frameIndex = Math.floor((elapsedMs / 1000) * this.frameRate);
-
-      // ★ 音声時間停止検出: playbackCurrentTime がキャップされると frameIndex が固定される
-      // 1.5秒以上固定 → 音声再生完了とみなしストリーム終了
-      if (this.liveAudioTimeGetter && frameIndex === this._lastLiveFrameIndex) {
-        if (!this._liveStallStart) {
-          this._liveStallStart = performance.now();
-        } else if (performance.now() - this._liveStallStart > 1500) {
-          console.log(`[LAM Live] Stream ended (audio playback complete at ${(elapsedMs/1000).toFixed(1)}s, frame ${frameIndex}/${this.frameBuffer.length})`);
-          this.liveStreamStartTime = null;
-          this.liveStreamConsumedIndex = 0;
-          this.liveStreamIsFinal = false;
-          this.frameBuffer = [];
-          this.fadeOutStartTime = performance.now();
-          this._lastLiveFrameIndex = -1;
-          this._liveStallStart = null;
-          // → 下の fade-out パスで処理
-        }
-      } else {
-        this._lastLiveFrameIndex = frameIndex;
-        this._liveStallStart = null;
-      }
-
-      if (this.liveStreamStartTime !== null && frameIndex >= 0 && frameIndex < this.frameBuffer.length) {
-        this.expressionData = {};
-        const frame = this.frameBuffer[frameIndex];
-        const fadeAlpha = frameIndex < this.FADE_IN_FRAMES
-          ? frameIndex / this.FADE_IN_FRAMES
-          : 1.0;
-        Object.keys(frame).forEach((name: string) => {
-          this.expressionData[name] = frame[name] * fadeAlpha;
-        });
-        this.liveStreamConsumedIndex = frameIndex;
-
-        if (frameIndex !== this.lastLoggedFrameIndex && frameIndex % 10 === 0) {
-          this.lastLoggedFrameIndex = frameIndex;
-          const f = this.expressionData;
-          console.log(
-            `[LAM Live-Sync] Frame ${frameIndex}/${this.frameBuffer.length}: ` +
-            `jaw=${(f['jawOpen']||0).toFixed(3)}, mouth=${(f['mouthLowerDownLeft']||0).toFixed(3)}, ` +
-            `funnel=${(f['mouthFunnel']||0).toFixed(3)}, smile=${(f['mouthSmileLeft']||0).toFixed(3)}, ` +
-            `pucker=${(f['mouthPucker']||0).toFixed(3)}, audioTime=${(elapsedMs/1000).toFixed(1)}s`
-          );
-        }
-
-        if (this.currentState !== 'Responding') {
-          this.setChatState('Responding');
-        }
-        return this.safeReturnExpression();
-
-      } else if (this.liveStreamStartTime !== null && frameIndex >= this.frameBuffer.length) {
-        // バッファ末端到達
-        if (this.liveStreamIsFinal) {
-          console.log(`[LAM Live] Stream ended (all ${this.frameBuffer.length} frames played, is_final=true)`);
-          this.liveStreamStartTime = null;
-          this.liveStreamConsumedIndex = 0;
-          this.liveStreamIsFinal = false;
-          this.frameBuffer = [];
-          this.fadeOutStartTime = performance.now();
-        } else {
-          // is_final 未受信 → 新しいチャンクが来るか待つ（最大2秒）
-          const wallElapsed = performance.now() - this.liveStreamStartTime;
-          const bufferEndMs = this.frameBuffer.length / this.frameRate * 1000;
-          const waitMs = wallElapsed - bufferEndMs;
-          if (waitMs < 2000) {
-            const lastFrame = this.frameBuffer[this.frameBuffer.length - 1];
-            if (lastFrame) {
-              this.expressionData = {};
-              Object.keys(lastFrame).forEach((name: string) => {
-                this.expressionData[name] = lastFrame[name];
-              });
-            }
-            return this.safeReturnExpression();
-          }
-          console.log(`[LAM Live] Stream ended (no new chunks for ${waitMs.toFixed(0)}ms)`);
-          this.liveStreamStartTime = null;
-          this.liveStreamConsumedIndex = 0;
-          this.liveStreamIsFinal = false;
-          this.frameBuffer = [];
-          this.fadeOutStartTime = performance.now();
-        }
-      }
-    }
-
-    // Live stream ended → fade-out to Idle
-    // liveStreamStartTime が null（ストリーム終了済み）かつ fadeOutStartTime が設定されている場合
-    if (this.fadeOutStartTime !== null && this.liveStreamStartTime === null && this.currentState === 'Responding') {
-      const fadeOutDurationMs = (this.FADE_IN_FRAMES / this.frameRate) * 1000;
-      const elapsed = performance.now() - this.fadeOutStartTime;
-      const fadeOutAlpha = Math.max(0, 1.0 - elapsed / fadeOutDurationMs);
-
-      if (fadeOutAlpha > 0) {
-        Object.keys(this.expressionData).forEach((name: string) => {
-          this.expressionData[name] = (this.expressionData[name] || 0) * fadeOutAlpha;
-        });
-        return this.safeReturnExpression();
-      }
-
-      // Fade-out complete → Idle復帰
-      this.fadeOutStartTime = null;
-      this.ttsActive = false;  // Live モードで偽 play イベントにより true になった状態をクリア
-      console.log('[LAM Live] Fade-out complete, returning to Idle');
-      this.resetExpression();
-      this.setChatState('Idle');
-      return this.safeReturnExpression();
+      return this.expressionData;
     }
 
     // TTS sync mode: index frameBuffer by ttsPlayer.currentTime
@@ -763,28 +447,18 @@ class LAMAvatarController {
             this.expressionData[name] = frame[name] * fadeAlpha;
           });
 
-          // ★ SDK全52ch対応判明: remapForSdkLimitation() は不要
-          // SDKは morphTargetDictionary の全キーを boneTexture に書き込み、
-          // シェーダーが for(i < bsCount) で全チャンネル適用する。
-          // A2E の52次元出力をそのまま渡す。
-
           if (frameIndex !== this.lastLoggedFrameIndex && frameIndex % 10 === 0) {
             this.lastLoggedFrameIndex = frameIndex;
-            const f = this.expressionData;
-            console.log(
-              `[LAM TTS-Sync] Frame ${frameIndex}/${this.frameBuffer.length}: ` +
-              `jaw=${(f['jawOpen']||0).toFixed(3)}, mouth=${(f['mouthLowerDownLeft']||0).toFixed(3)}, ` +
-              `funnel=${(f['mouthFunnel']||0).toFixed(3)}, smile=${(f['mouthSmileLeft']||0).toFixed(3)}, ` +
-              `pucker=${(f['mouthPucker']||0).toFixed(3)}, stretch=${(f['mouthStretchLeft']||0).toFixed(3)}, ` +
-              `time=${effectiveTimeMs.toFixed(0)}ms`
-            );
+            const jaw = this.expressionData['jawOpen'] || 0;
+            const mouth = this.expressionData['mouthLowerDownLeft'] || 0;
+            console.log(`[LAM TTS-Sync] Frame ${frameIndex}/${this.frameBuffer.length}: jaw=${jaw.toFixed(3)}, mouth=${mouth.toFixed(3)}, time=${effectiveTimeMs.toFixed(0)}ms`);
           }
 
           if (this.currentState !== 'Responding') {
             this.setChatState('Responding');
           }
           this.ttsLastCurrentTime = this.externalTtsPlayer.currentTime;
-          return this.safeReturnExpression();
+          return this.expressionData;
 
         } else if (frameIndex >= this.frameBuffer.length) {
           // Past buffer end - hold last frame while TTS still playing
@@ -794,17 +468,15 @@ class LAMAvatarController {
             Object.keys(lastFrame).forEach((name: string) => {
               this.expressionData[name] = lastFrame[name];
             });
-            // remapForSdkLimitation 不要: SDK全52ch対応
           }
           if (!this.externalTtsPlayer.ended) {
-            return this.safeReturnExpression();
+            return this.expressionData;
           }
         }
       }
 
       // TTS ended - fade out over FADE_IN_FRAMES then reset to idle
-      // ttsTransitioning中はskip（新TTS待ちで旧audioのended=trueが残っている）
-      if (this.externalTtsPlayer.ended && !this.ttsActive && !this.ttsTransitioning) {
+      if (this.externalTtsPlayer.ended && !this.ttsActive) {
         if (this.currentState === 'Responding') {
           // Gradually fade expression to neutral over ~200ms
           if (!this.fadeOutStartTime) {
@@ -819,7 +491,7 @@ class LAMAvatarController {
             Object.keys(this.expressionData).forEach((name: string) => {
               this.expressionData[name] = (this.expressionData[name] || 0) * fadeOutAlpha;
             });
-            return this.safeReturnExpression();
+            return this.expressionData;
           }
 
           // Fade-out complete
@@ -837,7 +509,7 @@ class LAMAvatarController {
       console.log(`[LAM Idle] buffer=${this.frameBuffer.length}, ttsActive=${this.ttsActive}, ttsTime=${ttsTime}s`);
     }
 
-    return this.safeReturnExpression();
+    return this.expressionData;
   }
 
   public setExpressionData(data: ExpressionData) {
@@ -857,7 +529,7 @@ class LAMAvatarController {
   }
 
   /**
-   * Queue expression frames from REST API (TTS-sync: ttsPlayer.currentTime で再生)
+   * Queue expression frames from REST API
    * Frames are appended to frameBuffer for TTS-sync playback
    */
   public queueExpressionFrames(frames: ExpressionData[], frameRate: number = 30): void {
@@ -872,93 +544,15 @@ class LAMAvatarController {
   }
 
   /**
-   * Queue expression frames from Live API (real-time sync: performance.now() で再生)
-   * Live API のオーディオは audioIO (Web Audio API) 経由で再生されるため、
-   * ttsPlayer.currentTime は使えない。リアルタイムクロックで同期する。
-   */
-  /**
-   * audioPlaybackTimeSec: AudioContext.currentTime ベースの音声再生経過時間（秒）
-   * audioIO.playbackCurrentTime から取得。AudioContext のハードウェアクロックに
-   * 同期するため、performance.now() より正確な音声再生位置を示す。
-   */
-  public queueLiveExpressionFrames(frames: ExpressionData[], frameRate: number = 30, audioPlaybackTimeSec?: number | null, isFinal?: boolean, chunkIndex?: number): void {
-    if (!frames || frames.length === 0) return;
-
-    if (this.liveStreamStartTime === null) {
-      // AudioContext の再生経過時間が提供されている場合、
-      // 既に再生された分のフレームをスキップするためのオフセットを計算
-      if (audioPlaybackTimeSec != null && audioPlaybackTimeSec > 0) {
-        // performance.now() からオフセットを引いて、音声開始時点の仮想タイムスタンプを算出
-        const audioElapsedMs = audioPlaybackTimeSec * 1000;
-        this.liveStreamStartTime = performance.now() - audioElapsedMs;
-        const skipFrames = Math.floor(audioPlaybackTimeSec * frameRate);
-        console.log(`[LAM Live] Stream started — synced to AudioContext (${audioElapsedMs.toFixed(0)}ms played, skip ${skipFrames} frames), ${frames.length} frames at ${frameRate}fps`);
-      } else {
-        this.liveStreamStartTime = performance.now();
-        console.log(`[LAM Live] Stream started — first ${frames.length} frames at ${frameRate}fps`);
-      }
-      this.liveStreamConsumedIndex = 0;
-      this.frameBuffer = [];
-      this.frameRate = frameRate;
-      this.liveStreamIsFinal = false;
-    }
-
-    this.frameBuffer = this.frameBuffer.concat(frames);
-
-    if (isFinal) {
-      this.liveStreamIsFinal = true;
-      console.log(`[LAM Live] +${frames.length} frames (total: ${this.frameBuffer.length}) at ${frameRate}fps [FINAL chunk#${chunkIndex ?? '?'}]`);
-    } else {
-      console.log(`[LAM Live] +${frames.length} frames (total: ${this.frameBuffer.length}) at ${frameRate}fps [chunk#${chunkIndex ?? '?'}]`);
-    }
-
-    // 非ゼロフレーム数をログ
-    let nonZeroCount = 0;
-    frames.forEach(f => {
-      const jaw = f['jawOpen'] || 0;
-      const funnel = f['mouthFunnel'] || 0;
-      if (jaw > 0.01 || funnel > 0.01) nonZeroCount++;
-    });
-    if (nonZeroCount > 0) {
-      console.log(`[LAM Live] ${nonZeroCount}/${frames.length} frames have non-zero mouth values`);
-    } else {
-      console.warn(`[LAM Live] ALL ${frames.length} frames have zero mouth values — backend may not be generating expression`);
-    }
-
-    if (this.currentState !== 'Responding') {
-      this.setChatState('Responding');
-    }
-  }
-
-  /**
-   * Stop live stream expression sync
-   */
-  public stopLiveStream(): void {
-    if (this.liveStreamStartTime !== null) {
-      console.log(`[LAM Live] Stream stopped (consumed ${this.liveStreamConsumedIndex}/${this.frameBuffer.length} frames)`);
-    }
-    this.liveStreamStartTime = null;
-    this.liveStreamConsumedIndex = 0;
-    this.liveStreamIsFinal = false;
-    this.frameBuffer = [];
-    this.fadeOutStartTime = performance.now();
-    this._lastLiveFrameIndex = -1;
-    this._liveStallStart = null;
-  }
-
-  /**
    * Clear frame buffer (call when starting new speech)
    */
   public clearFrameBuffer(): void {
     this.frameBuffer = [];
     this.lastLoggedFrameIndex = -1;
     this.ttsActive = false;
-    this.ttsTransitioning = true; // 新TTS開始まで早期fade-outを抑制
     this.ttsLastCurrentTime = 0;
     this.fadeOutStartTime = null;
-    this.liveStreamStartTime = null;
-    this.liveStreamConsumedIndex = 0;
-    console.log('[LAM Avatar] Frame buffer cleared (transitioning)');
+    console.log('[LAM Avatar] Frame buffer cleared');
   }
 
   /**
@@ -967,8 +561,6 @@ class LAMAvatarController {
   public stopTtsSync(): void {
     console.log('[LAM Avatar] stopTtsSync called');
     this.ttsActive = false;
-    this.liveStreamStartTime = null;
-    this.liveStreamConsumedIndex = 0;
     this.resetExpression();
     this.setChatState('Idle');
   }

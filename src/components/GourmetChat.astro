@@ -2,13 +2,12 @@
 // GourmetChat.astro - チャットモード(モード切替機能付き)
 export interface Props {
   apiBaseUrl?: string;
-  backendUrl?: string;
 }
 
-const { apiBaseUrl = '', backendUrl = '' } = Astro.props;
+const { apiBaseUrl = '' } = Astro.props;
 ---
 
-<div class="gourmet-chat-container" data-api-base={apiBaseUrl} data-backend-url={backendUrl}>
+<div class="gourmet-chat-container" data-api-base={apiBaseUrl}>
   <div class="splash-overlay" id="splashOverlay">
     <video id="splashVideo" class="splash-video" autoplay muted playsinline loop>
       <source src="/splash.mp4" type="video/mp4">
@@ -342,8 +341,6 @@ input:checked + .slider:before { transform: translateX(20px); }
 
 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 </style>
-
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
 <script>
   import { ChatController } from '../scripts/chat/chat-controller';

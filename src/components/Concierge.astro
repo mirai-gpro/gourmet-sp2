@@ -6,20 +6,18 @@ import LAMAvatar from './LAMAvatar.astro';
 
 export interface Props {
   apiBaseUrl?: string;
-  backendUrl?: string;
   useLAMAvatar?: boolean;  // Enable LAM 3D Avatar
   avatarPath?: string;     // Path to LAM avatar .zip file
 }
 
 const {
   apiBaseUrl = '',
-  backendUrl = '',
   useLAMAvatar = true,    // Default to LAM 3D Avatar
   avatarPath = '/avatar/concierge.zip'
 } = Astro.props;
 ---
 
-<div class="gourmet-chat-container mode-concierge" data-api-base={apiBaseUrl} data-backend-url={backendUrl}>
+<div class="gourmet-chat-container mode-concierge" data-api-base={apiBaseUrl}>
   
   <div class="splash-overlay" id="splashOverlay">
     <video id="splashVideo" class="splash-video" autoplay muted playsinline loop>
@@ -304,8 +302,6 @@ input:checked + .slider:before { transform: translateX(20px); }
 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.8; } }
 </style>
-
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
 <script>
   import { ConciergeController } from '../scripts/chat/concierge-controller';

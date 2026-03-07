@@ -2,10 +2,8 @@
 // chat.astro - チャットのみのページ（テスト用）
 import GourmetChat from '../components/GourmetChat.astro';
 
-// Vercel rewrites で same-origin proxy 経由
-const apiBaseUrl = '';
-// WebSocket は Vercel proxy 非対応のため、バックエンドに直接接続
-const backendUrl = 'https://support-base-hhasiuut7q-uc.a.run.app';
+// APIベースURL
+const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
 ---
 
 <!DOCTYPE html>
@@ -42,7 +40,7 @@ const backendUrl = 'https://support-base-hhasiuut7q-uc.a.run.app';
 </head>
 <body>
   <div class="container">
-    <GourmetChat apiBaseUrl={apiBaseUrl} backendUrl={backendUrl} />
+    <GourmetChat apiBaseUrl={apiBaseUrl} />
   </div>
 </body>
 </html>

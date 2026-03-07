@@ -3,10 +3,7 @@
 import ConciergeComponent from '../components/Concierge.astro';
 import ShopCardList from '../components/ShopCardList.astro';
 
-// Vercel rewrites で same-origin proxy 経由
-const apiBaseUrl = '';
-// WebSocket / Socket.IO は Vercel proxy 非対応のため、バックエンドに直接接続
-const backendUrl = 'https://support-base-hhasiuut7q-uc.a.run.app';
+const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
 ---
 
 <!DOCTYPE html>
@@ -209,7 +206,7 @@ const backendUrl = 'https://support-base-hhasiuut7q-uc.a.run.app';
 
         <main class="main-content">
             <section class="chat-section">
-                <ConciergeComponent apiBaseUrl={apiBaseUrl} backendUrl={backendUrl} />
+                <ConciergeComponent apiBaseUrl={apiBaseUrl} />
             </section>
 
             <section class="shop-list-section" id="shopListSection">
