@@ -163,9 +163,11 @@ class LiveSession:
     async def _receive_loop(self, session):
         """Geminiからのレスポンスを受信してブラウザにリレー"""
         try:
+            logger.info("[LiveSession] Receive loop started, waiting for responses...")
             async for response in session.receive():
                 if not self.running:
                     break
+                logger.info(f"[LiveSession] Received response: {type(response).__name__}")
                 await self._handle_response(session, response)
         except Exception as e:
             if self.running:
@@ -353,10 +355,11 @@ class LiveSession:
         if self.loop and self.audio_queue is not None:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
+                logger.info(f"[LiveSession] Sending audio: {len(audio_bytes)} bytes")
                 data = types.LiveClientRealtimeInput(
                     media_chunks=[types.Blob(
                         data=audio_bytes,
-                        mime_type="audio/pcm"
+                        mime_type="audio/pcm;rate=16000"
                     )]
                 )
                 asyncio.run_coroutine_threadsafe(
