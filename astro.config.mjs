@@ -39,6 +39,7 @@ export default defineConfig({
         '/api/v2': {
           target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
           changeOrigin: true,
+          ws: true,  // LiveAPI WebSocket対応
         },
         '/api/stt': {
           target: process.env.PUBLIC_API_URL || 'http://localhost:8000',
