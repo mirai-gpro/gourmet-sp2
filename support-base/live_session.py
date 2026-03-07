@@ -150,12 +150,9 @@ class LiveSession:
             self._ws_send(json.dumps({'type': 'live_ready'}))
             logger.info(f"[LiveSession] Connected: session={self.session_id}")
 
-            # 受信ループと送信ループを並行実行
+            # 受信ループを実行（送信はsend_text/send_audioから直接実行）
             try:
-                await asyncio.gather(
-                    self._receive_loop(session),
-                    self._send_loop(session)
-                )
+                await self._receive_loop(session)
             except Exception as e:
                 if self.running:
                     logger.error(f"[LiveSession] Loop error: {e}")
@@ -175,13 +172,13 @@ class LiveSession:
                 self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
 
     async def _send_loop(self, session):
-        """キューからデータを取得してGeminiに送信"""
+        """キューからデータ(音声チャンク)を取得してGeminiに送信"""
         while self.running:
             try:
                 data = await asyncio.wait_for(self.audio_queue.get(), timeout=1.0)
                 if data is None:
                     break
-                await session.send(data)
+                await session.send(input=data)
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
@@ -190,13 +187,17 @@ class LiveSession:
 
     async def _handle_response(self, session, response):
         """Gemini LiveAPIレスポンスを処理"""
+        logger.debug(f"[LiveSession] Response attrs: {[a for a in dir(response) if not a.startswith('_')]}")
+
         # モデル応答（音声 + テキスト）
         if hasattr(response, 'server_content') and response.server_content:
             content = response.server_content
 
             if hasattr(content, 'model_turn') and content.model_turn:
-                for part in content.model_turn.parts:
+                parts = content.model_turn.parts or []
+                for part in parts:
                     if hasattr(part, 'text') and part.text:
+                        logger.info(f"[LiveSession] Text response: {part.text[:100]}")
                         self._ws_send(json.dumps({
                             'type': 'text',
                             'data': part.text
@@ -206,6 +207,7 @@ class LiveSession:
                         audio_b64 = base64.b64encode(
                             part.inline_data.data
                         ).decode('utf-8')
+                        logger.info(f"[LiveSession] Audio response: {len(audio_b64)} chars")
                         self._ws_send(json.dumps({
                             'type': 'audio',
                             'data': audio_b64
@@ -213,15 +215,17 @@ class LiveSession:
 
             # ターン完了
             if hasattr(content, 'turn_complete') and content.turn_complete:
+                logger.info("[LiveSession] Turn complete received from Gemini")
                 self._ws_send(json.dumps({'type': 'turn_complete'}))
 
         # ツールコール（ショップ検索等）
         if hasattr(response, 'tool_call') and response.tool_call:
+            logger.info(f"[LiveSession] Tool call received")
             await self._handle_tool_call(session, response.tool_call)
 
     async def _handle_tool_call(self, session, tool_call):
         """
-        ツールコール処理
+        ツールコール処理（タイムアウト付き）
         🚨 処理順序を厳守:
         1. tool_call 受信
         2. function_name 判定
@@ -234,18 +238,34 @@ class LiveSession:
                 query = fc.args.get("query", "") if fc.args else ""
                 area = fc.args.get("area", "") if fc.args else ""
 
-                # 同期処理をexecutorで実行（既存コード使用）
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda q=query, a=area: self._execute_restaurant_search(q, a)
-                )
+                shops = []
+                response_text = ''
+                tts_audio = ''
 
-                shops = result.get('shops', [])
-                response_text = result.get('response', '')
-                tts_audio = result.get('tts_audio', '')
+                try:
+                    # 同期処理をexecutorで実行（60秒タイムアウト）
+                    loop = asyncio.get_event_loop()
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda q=query, a=area: self._execute_restaurant_search(q, a)
+                        ),
+                        timeout=60.0
+                    )
 
-                # ショップデータをフロントエンドに送信
+                    shops = result.get('shops', [])
+                    response_text = result.get('response', '')
+                    tts_audio = result.get('tts_audio', '')
+                    logger.info(f"[LiveSession] Shop search result: {len(shops)} shops")
+
+                except asyncio.TimeoutError:
+                    logger.error(f"[LiveSession] Restaurant search timed out after 60s")
+                    response_text = 'レストランの検索に時間がかかりすぎました。もう一度お試しください。'
+                except Exception as e:
+                    logger.error(f"[LiveSession] Restaurant search error: {e}")
+                    response_text = 'レストランの検索中にエラーが発生しました。もう一度お試しください。'
+
+                # ショップデータをフロントエンドに送信（エラー時もレスポンスを返す）
                 self._ws_send(json.dumps({
                     'type': 'shops',
                     'data': {
@@ -255,8 +275,6 @@ class LiveSession:
                     }
                 }))
 
-                logger.info(f"[LiveSession] Shop search result: {len(shops)} shops")
-
                 # ツール結果をGeminiに返す
                 try:
                     shop_names = [s.get('name', '') for s in shops]
@@ -265,7 +283,7 @@ class LiveSession:
                             types.FunctionResponse(
                                 name="search_restaurants",
                                 response={
-                                    "result": f"{len(shops)}件のレストランが見つかりました",
+                                    "result": f"{len(shops)}件のレストランが見つかりました" if shops else "検索結果なし",
                                     "shops": shop_names
                                 }
                             )
@@ -274,8 +292,24 @@ class LiveSession:
                     await session.send(input=tool_response)
                 except Exception as e:
                     logger.error(f"[LiveSession] Tool response send error: {e}")
+                    # ツール結果送信失敗時もフロントエンドにturn_completeを送信
+                    self._ws_send(json.dumps({'type': 'turn_complete'}))
             else:
                 logger.warning(f"[LiveSession] Unknown tool call: {fc.name}")
+                # 未知のツールコールにも応答を返す
+                try:
+                    tool_response = types.LiveClientToolResponse(
+                        function_responses=[
+                            types.FunctionResponse(
+                                name=fc.name,
+                                response={"error": "Unknown tool"}
+                            )
+                        ]
+                    )
+                    await session.send(input=tool_response)
+                except Exception as e:
+                    logger.error(f"[LiveSession] Unknown tool response error: {e}")
+                    self._ws_send(json.dumps({'type': 'turn_complete'}))
 
     def _execute_restaurant_search(self, query, area):
         """
@@ -352,30 +386,35 @@ class LiveSession:
 
     def send_audio(self, audio_base64):
         """ブラウザからの音声チャンクをGeminiにリレー"""
-        if self.loop and self.audio_queue is not None:
+        if self.loop and self.gemini_session is not None:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
-                logger.info(f"[LiveSession] Sending audio: {len(audio_bytes)} bytes")
                 data = types.LiveClientRealtimeInput(
                     media_chunks=[types.Blob(
                         data=audio_bytes,
                         mime_type="audio/pcm;rate=16000"
                     )]
                 )
-                asyncio.run_coroutine_threadsafe(
-                    self.audio_queue.put(data),
-                    self.loop
-                )
+                async def _send_audio():
+                    try:
+                        await self.gemini_session.send(input=data)
+                    except Exception as e:
+                        logger.error(f"[LiveSession] Audio send error: {e}")
+                asyncio.run_coroutine_threadsafe(_send_audio(), self.loop)
             except Exception as e:
-                logger.error(f"[LiveSession] Audio queue error: {e}")
+                logger.error(f"[LiveSession] Audio decode error: {e}")
 
     def send_text(self, text):
-        """テキスト入力をGeminiに送信"""
-        if self.loop and self.audio_queue is not None:
-            asyncio.run_coroutine_threadsafe(
-                self.audio_queue.put(text),
-                self.loop
-            )
+        """テキスト入力をGeminiに送信（end_of_turn=True で即応答を要求）"""
+        if self.loop and self.gemini_session is not None:
+            async def _send_text():
+                try:
+                    await self.gemini_session.send(input=text, end_of_turn=True)
+                    logger.info(f"[LiveSession] Text sent with end_of_turn=True: {text[:50]}")
+                except Exception as e:
+                    logger.error(f"[LiveSession] Text send error: {e}")
+                    self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
+            asyncio.run_coroutine_threadsafe(_send_text(), self.loop)
 
     def close(self):
         """セッション終了"""
