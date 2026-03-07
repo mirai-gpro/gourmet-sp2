@@ -340,42 +340,39 @@ class LiveSession:
 
     def _execute_restaurant_search(self, query, area):
         """
-        既存の support_core.py + api_integrations.py でショップ検索実行
-        🚨 既存ロジック維持: support_core.py / api_integrations.py は変更しない
+        HotPepper API で直接検索 → Google Places 等で enrichment
+
+        旧実装では support_core.process_user_message() 経由で REST Gemini API を
+        二重呼び出ししていたが、LiveAPI の Gemini が既に query/area を抽出済みのため不要。
+        これにより:
+          - 20秒→数秒に短縮（REST Gemini API 呼び出し削除）
+          - チャットモードのセッション不整合エラー解消
         """
         try:
-            from support_core import SupportSession, SupportAssistant, SYSTEM_PROMPTS
-            from api_integrations import enrich_shops_with_photos, extract_area_from_text
+            from api_integrations import (
+                search_google_restaurants, enrich_shops_with_photos,
+                extract_area_from_text, get_region_from_area
+            )
 
-            session = SupportSession(self.session_id)
-            session_data = session.get_data()
+            language = self.language
 
-            if not session_data:
-                logger.warning(f"[LiveSession] Session not found: {self.session_id}")
+            if not area:
+                area = extract_area_from_text(query, language)
+
+            geo_info = get_region_from_area(area, language) if area else None
+
+            # Google Places Text Search で実在店舗を検索（ハルシネーション・廃業対策）
+            shops = search_google_restaurants(query, area, geo_info, language, count=5)
+
+            if not shops:
+                logger.info(f"[LiveSession] Google Places: 0件 query='{query}' area='{area}'")
                 return {'shops': [], 'response': '', 'tts_audio': ''}
 
-            language = session_data.get('language', self.language)
+            # Google Places / 食べログ / ぐるなび 等で enrichment
+            shops = enrich_shops_with_photos(shops, area, language) or []
 
-            assistant = SupportAssistant(session, SYSTEM_PROMPTS)
-            result = assistant.process_user_message(query, 'conversation')
-
-            shops = result.get('shops') or []
-            response_text = result.get('response', '')
-
-            if shops:
-                if not area:
-                    area = extract_area_from_text(query, language)
-                shops = enrich_shops_with_photos(shops, area, language) or []
-
-                if shops:
-                    tts_audio = self._generate_tts(response_text, language)
-                    return {
-                        'shops': shops,
-                        'response': response_text,
-                        'tts_audio': tts_audio
-                    }
-
-            return {'shops': shops, 'response': response_text, 'tts_audio': ''}
+            logger.info(f"[LiveSession] Search complete: {len(shops)} shops")
+            return {'shops': shops, 'response': '', 'tts_audio': ''}
 
         except Exception as e:
             logger.error(f"[LiveSession] Restaurant search error: {e}")
