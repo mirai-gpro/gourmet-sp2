@@ -227,6 +227,17 @@ export class CoreController {
           return;
         }
 
+        // ★ v2: AudioContext の復帰 + 再生キューリセット
+        // iOS Safari ではバックグラウンドから戻ると AudioContext が suspended/interrupted になる
+        try {
+          this.audioManager.stopAll();
+          await this.audioManager.resumeAudioContext();
+          console.log('[Foreground] AudioContext resumed successfully');
+        } catch (e) {
+          console.warn('[Foreground] AudioContext resume failed, full reset...', e);
+          this.audioManager.fullResetAudioResources();
+        }
+
         // 1. WebSocket再接続（切断されていた場合）
         if (this.ws && this.ws.readyState !== WebSocket.OPEN && this.wsUrl) {
           console.log('[Foreground] Reconnecting WebSocket...');
@@ -335,7 +346,9 @@ export class CoreController {
         this.resetInputState();
         break;
       case 'audio':
-        // AI音声（PCM 24kHz base64）→ Web Audio API で再生
+        // ★ v2: AI音声（PCM 24kHz base64）→ キュー方式でギャップレス再生
+        // 複数チャンクが連続で来るので、.then() で isAISpeaking=false にしない
+        // → isAISpeaking は turn_complete / interrupted で制御
         console.log(`[Core] WS audio received: ${msg.data?.length || 0} chars`);
         this.isAISpeaking = true;
         if (this.isRecording) this.stopStreamingSTT();
@@ -343,13 +356,7 @@ export class CoreController {
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
         this.els.voiceStatus.className = 'voice-status speaking';
         if (this.isUserInteracted) {
-          this.audioManager.playPcmAudio(msg.data).then(() => {
-            this.isAISpeaking = false;
-            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-            this.els.voiceStatus.className = 'voice-status stopped';
-          }).catch(() => { this.isAISpeaking = false; });
-        } else {
-          this.isAISpeaking = false;
+          this.audioManager.playPcmAudio(msg.data).catch(() => {});
         }
         break;
       case 'rest_audio':
@@ -371,8 +378,18 @@ export class CoreController {
         }
         break;
       case 'interrupted':
+        // ★ v2: サーバーからの interrupted で全停止 + UI復帰
         this.stopCurrentAudio();
         this.isAISpeaking = false;
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        break;
+      case 'turn_complete':
+        // ★ v2: ターン完了でAI発話状態を解除（ギャップレス再生の最終同期ポイント）
+        this.isAISpeaking = false;
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.resetInputState();
         break;
       case 'error':
         this.addMessage('system', `${this.t('sttError')} ${msg.message}`);
@@ -456,18 +473,25 @@ export class CoreController {
         this.ws = null;
       }
 
+      const sessionPayload = {
+        mode: this.currentMode,
+        language: this.currentLanguage,
+        dialogue_type: 'live',
+        user_id: this.getUserId()
+      };
+      console.log('[Core] session/start request:', JSON.stringify(sessionPayload));
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // BUG2修正: バックエンドは user_id, mode, language, dialogue_type をトップレベルで期待
-        body: JSON.stringify({
-          mode: this.currentMode,
-          language: this.currentLanguage,
-          dialogue_type: 'live',
-          user_id: this.getUserId()
-        })
+        body: JSON.stringify(sessionPayload)
       });
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error(`[Core] session/start failed: ${res.status} ${res.statusText}`, errBody);
+        throw new Error(`session/start failed: ${res.status}`);
+      }
       const data = await res.json();
+      console.log('[Core] session/start response:', JSON.stringify({ session_id: data.session_id, mode: data.mode, ws_url: data.ws_url }));
       this.sessionId = data.session_id;
 
       // ★ WebSocket接続（session_id取得後）
