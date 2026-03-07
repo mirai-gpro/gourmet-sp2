@@ -74,6 +74,7 @@ app.config["JSON_AS_ASCII"] = False  # UTF-8エンコーディングを有効化
 
 # 許可するオリジン(末尾のスラッシュなし)
 allowed_origins = [
+    "https://gourmet-sp2.vercel.app",
     "https://gourmet-sp-two.vercel.app",
     "https://gourmet-sp.vercel.app",
     "http://localhost:4321"
