@@ -4,7 +4,7 @@
 LiveAPI WebSocket セッション管理
 stt_stream.py の実装パターンに基づく Gemini LiveAPI 双方向ストリーム
 
-🚨 改変禁止: モデル名・設定値は本番稼働値と同一
+🚨 改変禁止: モデル名・設定値は stt_stream.py の本番稼働値と同一
 """
 import asyncio
 import base64
@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import threading
-import time
 
 from google import genai
 from google.genai import types
@@ -21,11 +20,12 @@ logger = logging.getLogger(__name__)
 
 # ========================================
 # 🚨 改変禁止: LiveAPI接続パラメータ
+# stt_stream.py の本番稼働値と同一
 # ========================================
 LIVE_API_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
 LIVE_API_CONFIG = {
-    "response_modalities": ["AUDIO"],
+    "response_modalities": ["AUDIO", "TEXT"],
     "speech_config": {
         "voice_config": {
             "prebuilt_voice_config": {
@@ -34,7 +34,11 @@ LIVE_API_CONFIG = {
         }
     }
 }
+
+# 🚨 検証: 仕様書 Section 6-1 の assert
+assert LIVE_API_MODEL == "gemini-2.5-flash-native-audio-preview-12-2025", "モデル名が改変されています"
 assert "AUDIO" in LIVE_API_CONFIG["response_modalities"]
+assert "TEXT" in LIVE_API_CONFIG["response_modalities"]
 
 # ショップ検索ツール定義
 SEARCH_TOOL = {
@@ -60,7 +64,7 @@ SEARCH_TOOL = {
     ]
 }
 
-# 言語 → TTS音声マッピング
+# 言語 → Cloud TTS音声マッピング（ショップカード紹介用）
 VOICE_MAP = {
     'ja': ('ja-JP', 'ja-JP-Chirp3-HD-Leda'),
     'en': ('en-US', 'en-US-Studio-O'),
@@ -83,7 +87,7 @@ class LiveSession:
         self.mode = mode
         self.loop = None
         self.gemini_session = None
-        self.audio_queue = None
+        self.send_queue = None
         self.running = False
         self.thread = None
         self._ws_lock = threading.Lock()
@@ -122,8 +126,9 @@ class LiveSession:
 
         client = genai.Client(api_key=api_key)
 
+        # 🚨 改変禁止: LiveConnectConfig は仕様書 Section 3-1-1 準拠
         config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
+            response_modalities=["AUDIO", "TEXT"],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -137,14 +142,14 @@ class LiveSession:
             tools=[SEARCH_TOOL]
         )
 
-        logger.info(f"[LiveSession] Connecting to Gemini LiveAPI: session={self.session_id}")
+        logger.info(f"[LiveSession] Connecting to Gemini LiveAPI: model={LIVE_API_MODEL}, session={self.session_id}")
 
         async with client.aio.live.connect(
             model=LIVE_API_MODEL,
             config=config
         ) as session:
             self.gemini_session = session
-            self.audio_queue = asyncio.Queue()
+            self.send_queue = asyncio.Queue()
 
             # フロントエンドに接続完了を通知
             self._ws_send(json.dumps({'type': 'live_ready'}))
@@ -163,11 +168,9 @@ class LiveSession:
     async def _receive_loop(self, session):
         """Geminiからのレスポンスを受信してブラウザにリレー"""
         try:
-            logger.info("[LiveSession] Receive loop started, waiting for responses...")
             async for response in session.receive():
                 if not self.running:
                     break
-                logger.info(f"[LiveSession] Received response: {type(response).__name__}")
                 await self._handle_response(session, response)
         except Exception as e:
             if self.running:
@@ -178,10 +181,18 @@ class LiveSession:
         """キューからデータを取得してGeminiに送信"""
         while self.running:
             try:
-                data = await asyncio.wait_for(self.audio_queue.get(), timeout=1.0)
-                if data is None:
+                item = await asyncio.wait_for(self.send_queue.get(), timeout=1.0)
+                if item is None:
                     break
-                await session.send(data)
+
+                # テキスト入力: (text, end_of_turn) タプル
+                if isinstance(item, tuple):
+                    text, end_of_turn = item
+                    await session.send(input=text, end_of_turn=end_of_turn)
+                # 音声入力: LiveClientRealtimeInput
+                else:
+                    await session.send(input=item)
+
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
@@ -222,10 +233,11 @@ class LiveSession:
     async def _handle_tool_call(self, session, tool_call):
         """
         ツールコール処理
-        🚨 処理順序を厳守:
+        🚨 仕様書 Section 3-1-3 処理順序を厳守:
         1. tool_call 受信
         2. function_name 判定
-        3. search_restaurants の場合: 既存コードでショップ検索 → 結果をフロントエンドに送信
+        3. search_restaurants → 既存コードでショップ検索 → 結果をフロントエンドに送信
+        4. それ以外 → Gemini に結果を返して会話続行
         """
         for fc in tool_call.function_calls:
             logger.info(f"[LiveSession] Tool call: {fc.name}, args={fc.args}")
@@ -352,10 +364,9 @@ class LiveSession:
 
     def send_audio(self, audio_base64):
         """ブラウザからの音声チャンクをGeminiにリレー"""
-        if self.loop and self.audio_queue is not None:
+        if self.loop and self.send_queue is not None:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
-                logger.info(f"[LiveSession] Sending audio: {len(audio_bytes)} bytes")
                 data = types.LiveClientRealtimeInput(
                     media_chunks=[types.Blob(
                         data=audio_bytes,
@@ -363,27 +374,27 @@ class LiveSession:
                     )]
                 )
                 asyncio.run_coroutine_threadsafe(
-                    self.audio_queue.put(data),
+                    self.send_queue.put(data),
                     self.loop
                 )
             except Exception as e:
                 logger.error(f"[LiveSession] Audio queue error: {e}")
 
     def send_text(self, text):
-        """テキスト入力をGeminiに送信"""
-        if self.loop and self.audio_queue is not None:
+        """テキスト入力をGeminiに送信（end_of_turn=True で応答を促す）"""
+        if self.loop and self.send_queue is not None:
             asyncio.run_coroutine_threadsafe(
-                self.audio_queue.put(text),
+                self.send_queue.put((text, True)),
                 self.loop
             )
 
     def close(self):
         """セッション終了"""
         self.running = False
-        if self.loop and self.audio_queue:
+        if self.loop and self.send_queue:
             try:
                 asyncio.run_coroutine_threadsafe(
-                    self.audio_queue.put(None),
+                    self.send_queue.put(None),
                     self.loop
                 )
             except Exception:
