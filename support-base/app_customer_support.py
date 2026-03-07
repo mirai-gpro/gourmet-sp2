@@ -22,6 +22,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from flask_sock import Sock
 from google import genai
 from google.genai import types
 from google.cloud import texttospeech
@@ -40,6 +41,7 @@ from support_core import (
     SupportSession,
     SupportAssistant
 )
+from live_session import LiveSessionManager
 
 # ロギング設定
 logging.basicConfig(
@@ -67,6 +69,10 @@ else:
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False  # UTF-8エンコーディングを有効化
+sock = Sock(app)
+
+# LiveAPI セッション管理
+live_session_manager = LiveSessionManager()
 
 # ========================================
 # CORS & SocketIO 設定 (Claudeアドバイス適用版)
@@ -879,6 +885,72 @@ def handle_stop_stream():
         del active_streams[request.sid]
 
     emit('stream_stopped', {'status': 'stopped'})
+
+
+# ========================================
+# LiveAPI WebSocket エンドポイント
+# ========================================
+@sock.route('/ws/live/<session_id>')
+def live_websocket(ws, session_id):
+    """
+    LiveAPI WebSocket エンドポイント
+    ブラウザ WebSocket ↔ バックエンド ↔ Gemini LiveAPI WebSocket
+    """
+    logger.info(f"[LiveAPI WS] 接続: session={session_id}")
+
+    # セッション情報を取得
+    session = SupportSession(session_id)
+    session_data = session.get_data()
+
+    if not session_data:
+        ws.send(json.dumps({'type': 'error', 'data': 'セッションが見つかりません'}))
+        return
+
+    language = session_data.get('language', 'ja')
+    mode = session_data.get('mode', 'chat')
+
+    # システムプロンプトを取得（既存ロジック維持）
+    mode_prompts = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS.get('chat', {}))
+    system_prompt = mode_prompts.get(language, mode_prompts.get('ja', ''))
+
+    # LiveAPIセッション作成・開始
+    live_session = live_session_manager.create(
+        session_id, system_prompt, ws, language, mode
+    )
+
+    try:
+        # ブラウザからのメッセージを受信してリレー
+        while True:
+            data = ws.receive(timeout=300)
+            if data is None:
+                break
+
+            try:
+                msg = json.loads(data)
+                msg_type = msg.get('type')
+
+                if msg_type == 'audio_chunk':
+                    live_session.send_audio(msg.get('data', ''))
+
+                elif msg_type == 'text_input':
+                    text = msg.get('data', '')
+                    if text:
+                        # テキスト入力を履歴に追加
+                        session.add_message('user', text, 'chat')
+                        live_session.send_text(text)
+
+                elif msg_type == 'cancel':
+                    logger.info(f"[LiveAPI WS] キャンセル: session={session_id}")
+                    break
+
+            except json.JSONDecodeError:
+                logger.warning(f"[LiveAPI WS] 不正なメッセージ: {data[:100]}")
+
+    except Exception as e:
+        logger.error(f"[LiveAPI WS] エラー: {e}")
+    finally:
+        live_session_manager.remove(session_id)
+        logger.info(f"[LiveAPI WS] 切断: session={session_id}")
 
 
 if __name__ == '__main__':
