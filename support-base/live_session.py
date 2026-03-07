@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 LIVE_API_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
 LIVE_API_CONFIG = {
-    "response_modalities": ["AUDIO", "TEXT"],
+    "response_modalities": ["AUDIO"],
     "speech_config": {
         "voice_config": {
             "prebuilt_voice_config": {
@@ -35,7 +35,6 @@ LIVE_API_CONFIG = {
     }
 }
 assert "AUDIO" in LIVE_API_CONFIG["response_modalities"]
-assert "TEXT" in LIVE_API_CONFIG["response_modalities"]
 
 # ショップ検索ツール定義
 SEARCH_TOOL = {
@@ -124,7 +123,7 @@ class LiveSession:
         client = genai.Client(api_key=api_key)
 
         config = types.LiveConnectConfig(
-            response_modalities=["AUDIO", "TEXT"],
+            response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
