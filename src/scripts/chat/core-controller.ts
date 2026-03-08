@@ -569,6 +569,10 @@ export class CoreController {
           this.isAISpeaking = false;
         };
         this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+      } else if (!ttsAudio && response && this.isTTSEnabled && this.isUserInteracted) {
+        // ttsAudio が空の場合はフォールバック: リアルタイムCloud TTSで読み上げ
+        console.log('[LiveAPI] ttsAudio empty, falling back to speakTextGCP');
+        this.speakTextGCP(response, true);
       }
     }
 
