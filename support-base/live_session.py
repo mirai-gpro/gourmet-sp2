@@ -61,34 +61,135 @@ SEARCH_TOOL = {
     ]
 }
 
-# LiveAPI 用プロンプト補足（音声会話向け UX フロー指示）
+# ============================================================
+# update_user_profile ツール定義（コンシェルジュモード用）
+# ============================================================
+UPDATE_PROFILE_TOOL = {
+    "function_declarations": [
+        {
+            "name": "update_user_profile",
+            "description": (
+                "ユーザーが名前や呼び方を教えてくれた場合に呼び出します。"
+                "初回訪問で名前を聞いた時や、呼び方の変更を依頼された時に使用します。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "preferred_name": {
+                        "type": "string",
+                        "description": "ユーザーの呼び名（例: 太郎、山田）"
+                    },
+                    "name_honorific": {
+                        "type": "string",
+                        "description": "敬称（例: 様、さん、くん）。指定がなければ「様」"
+                    }
+                },
+                "required": ["preferred_name"]
+            }
+        }
+    ]
+}
+
+# ============================================================
+# LiveAPI 用プロンプト補足
+# 基本プロンプト（support_system_ja.txt / concierge_ja.txt）の
+# JSON出力指示を全て上書きする。
+# ============================================================
 LIVE_API_PROMPT_SUPPLEMENT = """
 
-## 【重要】LiveAPI 音声会話モードの応答ルール
+---
+## 【最優先】LiveAPI 音声会話モード — 以下のルールが上記の全指示に優先します
 
-あなたは音声で直接ユーザーと会話しています。JSON形式ではなく、自然な話し言葉で応答してください。
+### 出力形式の上書き（重要）
 
-### レストラン検索時の応答フロー（必ず守ること）
+上記プロンプト内の以下の指示は **すべて無効** です。従わないでください：
+- 「JSON形式のみで応答」「JSON形式で出力」に関する全ての指示
+- 「message」「shops」フィールドの構造定義
+- 「action」フィールドによるプロファイル更新の指示
+- JSON応答例・出力チェックリスト内のJSON関連項目
 
-ユーザーがお店探しをリクエストした場合、**必ず以下の順序で応答してください**:
+### あなたの応答形式
 
-1. **復唱**: ユーザーのリクエスト内容を自然に復唱する
-   - 例: 「恵比寿で焼き鳥のお店をお探しですね！」
-   - 例: 「渋谷エリアで、デートにぴったりなイタリアンですね！」
-
-2. **お待ちメッセージ**: 検索する旨を伝える
-   - 例: 「お調べしますので、少々お待ちください。」
-   - 例: 「ぴったりのお店を探してきますね、少々お待ちくださいませ。」
-
-3. **ツール呼び出し**: 上記を話した後に search_restaurants を呼び出す
-
-4. **検索結果の紹介**: ツール結果を受け取ったら、見つかったお店を簡潔に紹介する
-   - 例: 「5件のお店が見つかりました。画面にカードが表示されていますので、ぜひご覧ください。気になるお店があればお気軽にお聞きくださいね。」
+あなたは **音声で直接ユーザーと会話** しています。
+- 全ての応答は **自然な話し言葉** で行ってください
+- JSON、マークダウン、構造化テキストは一切出力しないでください
+- 1回の発話は簡潔に（長文は避ける）
 
 ### 応答スタイル
 - 丁寧だが堅すぎない、親しみやすいコンシェルジュ口調
-- 1回の発話は簡潔に（長文は避ける）
 - 「えーっと」「そうですね」など自然なフィラーは適度に使ってOK
+- 金額を言う場合は漢数字で（「五千円」「一万二千円」）
+
+### 上記プロンプトから引き続き有効な指示
+
+以下のドメイン知識・行動ルールは **そのまま有効** です：
+- ヒアリングの順序（場所→目的→ジャンル→予算→日程）
+- 雰囲気条件の厳守ルール
+- 実在店舗のみ提案するルール
+- 短期記憶・重複質問禁止ルール
+- 業態別ヒアリング制御ルール
+- 長期記憶サマリールール
+- 音声読み上げ最適化（誤読防止）
+- AI電話予約機能の案内タイミング
+
+---
+
+### レストラン検索の仕組み（重要）
+
+ショップカードの作成・お店の詳細情報は **バックエンドが自動処理** します。
+あなたが JSON や shops 配列を生成する必要はありません。
+
+検索フロー:
+1. **復唱**: ユーザーのリクエスト内容を自然に復唱する
+   例: 「恵比寿で焼き鳥のお店をお探しですね！」
+2. **お待ちメッセージ**: 検索する旨を伝える
+   例: 「お調べしますので、少々お待ちください。」
+3. **ツール呼び出し**: search_restaurants ツールを呼び出す
+4. **結果紹介**: ツール結果を受けたら簡潔に紹介する
+   例: 「5件のお店が見つかりました。画面にカードが表示されていますので、ぜひご覧ください。気になるお店があればお気軽にお聞きくださいね。」
+
+※ ショップカードの表示・お店の説明音声はシステムが自動生成します。
+※ あなたは結果の件数と簡単な案内だけを話してください。
+
+### 深掘り質問への対応
+
+ユーザーが表示済みのお店について質問した場合:
+- 音声で自然に回答してください
+- 質問例: 「個室はある？」「予算は？」「ワインは充実してる？」
+- 知っている情報を元に回答し、不明な点は正直に伝えてください
+
+### 日時ワード検出時のAI電話予約案内
+
+ユーザーの発話に日時（明日、今週末、◯時など）が含まれる場合:
+- お店の紹介後に、AI電話予約機能を自然に案内してください
+- 例: 「明日のランチでしたら、私が直接お店に電話して予約確認もできますよ。」
+- 「予約依頼画面」というワードを含めてください
+"""
+
+# コンシェルジュモード専用の追加プロンプト
+LIVE_API_CONCIERGE_SUPPLEMENT = """
+
+### 初回挨拶について
+
+接続が確立したら、あなたから最初に挨拶してください。
+{greeting_instruction}
+
+### 名前の登録・変更
+
+ユーザーが名前を教えてくれたら update_user_profile ツールを呼び出してください。
+- 呼び名（preferred_name）と敬称（name_honorific）を設定します
+- 敬称の指定がなければデフォルトで「様」を使います
+- ユーザーが名前を教えたくない場合は、名前なしで会話を続けてください
+"""
+
+# グルメ（チャット）モード専用の追加プロンプト
+LIVE_API_CHAT_SUPPLEMENT = """
+
+### 初回挨拶について
+
+接続が確立したら、あなたから最初に挨拶してください。
+「こんにちは！お店探しをお手伝いします。どのようなお店をお探しですか？」
+のように、簡潔に挨拶してすぐにヒアリングに入ってください。
 """
 
 # Cloud TTS 音声マッピング（ショップカード紹介用、REST フォールバック時に使用）
@@ -100,14 +201,20 @@ VOICE_MAP = {
 }
 
 
-def build_live_config(system_prompt):
+def build_live_config(system_prompt, mode='chat'):
     """
     Live API 設定を構築（stt_stream.py _build_config 準拠）
 
     stt_stream.py との差異:
       - voice_name: "Aoede" を追加（グルメアプリ用の声）
-      - tools: search_restaurants を追加
+      - tools: search_restaurants（全モード）+ update_user_profile（コンシェルジュのみ）
+      - prefix_padding_ms: 100（stt_stream.py 準拠）
     """
+    # モード別ツール構成
+    tools = [SEARCH_TOOL]
+    if mode == 'concierge':
+        tools.append(UPDATE_PROFILE_TOOL)
+
     return {
         "response_modalities": ["AUDIO"],
         "system_instruction": system_prompt,
@@ -126,7 +233,7 @@ def build_live_config(system_prompt):
                 "disabled": False,
                 "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
                 "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                "prefix_padding_ms": 500,
+                "prefix_padding_ms": 100,
                 "silence_duration_ms": 500,
             }
         },
@@ -135,7 +242,7 @@ def build_live_config(system_prompt):
                 "target_tokens": 32000,
             }
         },
-        "tools": [SEARCH_TOOL],
+        "tools": tools,
     }
 
 
@@ -151,9 +258,17 @@ class LiveSession:
       - _handle_tool_call → _handle_tool_call
     """
 
-    def __init__(self, session_id, system_prompt, ws, language='ja', mode='chat'):
+    def __init__(self, session_id, system_prompt, ws, language='ja', mode='chat',
+                 user_context=''):
         self.session_id = session_id
+        # モード別プロンプト構築: 基本プロンプト + LiveAPI共通補足 + モード別補足
         self.system_prompt = system_prompt + LIVE_API_PROMPT_SUPPLEMENT
+        if mode == 'concierge':
+            self.system_prompt += LIVE_API_CONCIERGE_SUPPLEMENT.format(
+                greeting_instruction=user_context or '初めてのユーザーです。自然に挨拶して、名前を聞いてください。'
+            )
+        else:
+            self.system_prompt += LIVE_API_CHAT_SUPPLEMENT
         self.ws = ws
         self.language = language
         self.mode = mode
@@ -201,7 +316,7 @@ class LiveSession:
             raise RuntimeError("GEMINI_API_KEY が設定されていません")
 
         client = genai.Client(api_key=api_key)
-        config = build_live_config(self.system_prompt)
+        config = build_live_config(self.system_prompt, self.mode)
 
         logger.info(f"[LiveSession] Connecting: model={LIVE_API_MODEL}, session={self.session_id}")
 
@@ -214,6 +329,17 @@ class LiveSession:
 
             self._ws_send(json.dumps({'type': 'live_ready'}))
             logger.info(f"[LiveSession] Connected: session={self.session_id}")
+
+            # LiveAPI仕様: モデルが先に話すにはダミーのユーザー発話が必要
+            # 公式ドキュメント推奨のワークアラウンド
+            await session.send_client_content(
+                turns=types.Content(
+                    role="user",
+                    parts=[types.Part(text="こんにちは")]
+                ),
+                turn_complete=True
+            )
+            logger.info(f"[LiveSession] Initial trigger sent")
 
             # stt_stream.py: TaskGroup で send_audio, receive, play_audio を並行実行
             try:
@@ -368,8 +494,76 @@ class LiveSession:
                     )
                 except Exception as e:
                     logger.error(f"[LiveSession] Tool response error: {e}")
+            elif fc.name == "update_user_profile":
+                await self._handle_update_profile(session, fc)
+
             else:
                 logger.warning(f"[LiveSession] Unknown tool: {fc.name}")
+
+    async def _handle_update_profile(self, session, fc):
+        """
+        ユーザープロファイル更新ツール処理（コンシェルジュモード用）
+        既存のREST APIと同じ LongTermMemory.update_profile() を使用する。
+        """
+        preferred_name = fc.args.get("preferred_name", "") if fc.args else ""
+        name_honorific = fc.args.get("name_honorific", "様") if fc.args else "様"
+
+        logger.info(f"[LiveSession] Profile update: name={preferred_name}, honorific={name_honorific}")
+
+        result_msg = "プロファイル更新失敗"
+        try:
+            from support_core import SupportSession
+            support_session = SupportSession(self.session_id)
+            session_data = support_session.get_data()
+            user_id = session_data.get('user_id') if session_data else None
+
+            if user_id:
+                from long_term_memory import LongTermMemory
+                ltm = LongTermMemory()
+                updates = {
+                    'preferred_name': preferred_name,
+                    'name_honorific': name_honorific
+                }
+                success = ltm.update_profile(user_id, updates)
+                if success:
+                    # RAMセッションのプロファイルも更新
+                    if session_data:
+                        profile = session_data.get('long_term_profile') or {}
+                        profile.update(updates)
+                        session_data['long_term_profile'] = profile
+                        session_data['is_first_visit'] = False
+
+                    result_msg = f"{preferred_name}{name_honorific}として登録しました"
+                    logger.info(f"[LiveSession] Profile updated: {preferred_name}{name_honorific}")
+                else:
+                    logger.error(f"[LiveSession] Profile update failed for user_id={user_id}")
+            else:
+                logger.warning(f"[LiveSession] No user_id, skipping profile update")
+
+            # フロントエンドにも通知
+            self._ws_send(json.dumps({
+                'type': 'profile_updated',
+                'data': {
+                    'preferred_name': preferred_name,
+                    'name_honorific': name_honorific
+                }
+            }))
+        except Exception as e:
+            logger.error(f"[LiveSession] Profile update error: {e}")
+
+        # ツール結果を Gemini に返す
+        try:
+            await session.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        name=fc.name,
+                        id=fc.id,
+                        response={"result": result_msg}
+                    )
+                ]
+            )
+        except Exception as e:
+            logger.error(f"[LiveSession] Tool response error: {e}")
 
     def _execute_restaurant_search(self, query, area):
         """
@@ -537,9 +731,10 @@ class LiveSessionManager:
     def __init__(self):
         self.sessions = {}
 
-    def create(self, session_id, system_prompt, ws, language='ja', mode='chat'):
+    def create(self, session_id, system_prompt, ws, language='ja', mode='chat',
+               user_context=''):
         self.remove(session_id)
-        session = LiveSession(session_id, system_prompt, ws, language, mode)
+        session = LiveSession(session_id, system_prompt, ws, language, mode, user_context)
         self.sessions[session_id] = session
         session.start()
         return session
