@@ -405,11 +405,46 @@ class LiveSession:
             shops = enrich_shops_with_photos(shops, area, language) or []
 
             logger.info(f"[LiveSession] Search complete: {len(shops)} shops")
-            return {'shops': shops, 'response': '', 'tts_audio': ''}
+
+            # Cloud TTS でショップ紹介音声を生成（即時再生用）
+            intro_text = self._build_shop_intro_text(shops, language)
+            tts_audio = self._generate_tts(intro_text, language) if intro_text else ''
+
+            return {'shops': shops, 'response': intro_text, 'tts_audio': tts_audio}
 
         except Exception as e:
             logger.error(f"[LiveSession] Restaurant search error: {e}")
             return {'shops': [], 'response': '', 'tts_audio': ''}
+
+    def _build_shop_intro_text(self, shops, language):
+        """ショップ紹介テキストを構築（Cloud TTS用）"""
+        count = len(shops)
+        if count == 0:
+            return ''
+
+        shop_names = [s.get('name', '') for s in shops[:3]]
+        names_str = '、'.join(shop_names)
+
+        if language == 'ja':
+            text = f'お待たせしました。{count}件のお店が見つかりました。'
+            text += f'{names_str}などがございます。'
+            text += '画面のカードをご覧くださいませ。気になるお店があればお気軽にお聞きくださいね。'
+        elif language == 'en':
+            text = f"Thank you for waiting. I found {count} restaurants. "
+            text += f"Including {', '.join(shop_names[:3])}. "
+            text += "Please check the cards on screen. Feel free to ask about any restaurant."
+        elif language == 'zh':
+            text = f"让您久等了。找到了{count}家餐厅。"
+            text += f"包括{names_str}等。"
+            text += "请查看屏幕上的卡片。如果有感兴趣的餐厅，请随时询问。"
+        elif language == 'ko':
+            text = f"기다려 주셔서 감사합니다. {count}개의 레스토랑을 찾았습니다. "
+            text += f"{names_str} 등이 있습니다. "
+            text += "화면의 카드를 확인해 주세요. 궁금한 레스토랑이 있으시면 편하게 물어보세요."
+        else:
+            text = f'お待たせしました。{count}件のお店が見つかりました。'
+
+        return text
 
     def _generate_tts(self, text, language):
         """Cloud TTS で音声合成（ショップカード紹介用）"""

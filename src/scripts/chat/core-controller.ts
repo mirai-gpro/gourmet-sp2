@@ -26,6 +26,7 @@ export class CoreController {
   protected isAISpeaking = false;
   protected currentAISpeech = "";
   protected currentMode: 'chat' | 'concierge' = 'chat';
+  protected suppressNextLiveAudio = false;
 
   // LiveAPI応答蓄積用
   protected pendingResponseText = '';
@@ -151,6 +152,7 @@ export class CoreController {
     this.pendingResponseText = '';
     this.pendingAudioChunks = [];
     this.liveReady = false;
+    this.suppressNextLiveAudio = false;
 
     await new Promise(resolve => setTimeout(resolve, 300));
     await this.initializeSession();
@@ -269,7 +271,7 @@ export class CoreController {
         this.handleLiveShops(data);
       },
       onSearching: () => {
-        this.showWaitOverlay();
+        this.handleLiveSearching();
       },
       onError: (msg: string) => {
         console.error('[LiveAPI] Error:', msg);
@@ -362,9 +364,33 @@ export class CoreController {
   // LiveAPI 応答ハンドラー
   // ========================================
 
+  protected handleLiveSearching() {
+    // 即座にウエイティングアニメーション表示
+    this.showWaitOverlay();
+
+    // 事前生成済みの相槌TTS（"お調べします。"）を即座に再生
+    const ackText = this.t('ackSearch');
+    const ackAudio = this.preGeneratedAcks.get(ackText);
+    if (ackAudio && this.isTTSEnabled && this.isUserInteracted) {
+      console.log('[LiveAPI] Playing pre-generated ack:', ackText);
+      this.isAISpeaking = true;
+      this.ttsPlayer.src = `data:audio/mp3;base64,${ackAudio}`;
+      this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+      this.els.voiceStatus.className = 'voice-status speaking';
+      this.ttsPlayer.onended = () => {
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.isAISpeaking = false;
+      };
+      this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+    }
+  }
+
   protected handleLiveText(text: string) {
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
-    this.pendingResponseText += text;
+    if (!this.suppressNextLiveAudio) {
+      this.pendingResponseText += text;
+    }
   }
 
   protected handleLiveInputTranscription(text: string) {
@@ -373,6 +399,8 @@ export class CoreController {
   }
 
   protected handleLiveAudio(base64: string) {
+    // ショップ表示後のLiveAPI音声は抑制（Cloud TTSで代替済み）
+    if (this.suppressNextLiveAudio) return;
     this.pendingAudioChunks.push(base64);
     this.isAISpeaking = true;
   }
@@ -383,10 +411,21 @@ export class CoreController {
     this.pendingAudioChunks = [];
     this.pendingResponseText = '';
     this.isAISpeaking = false;
+    this.suppressNextLiveAudio = false;
   }
 
   protected handleLiveTurnComplete() {
     this.hideWaitOverlay();
+
+    // ショップ表示後のLiveAPI音声ターンは完全スキップ
+    if (this.suppressNextLiveAudio) {
+      this.suppressNextLiveAudio = false;
+      this.pendingResponseText = '';
+      this.pendingAudioChunks = [];
+      this.isProcessing = false;
+      this.resetInputState();
+      return;
+    }
 
     if (this.pendingResponseText) {
       this.addMessage('assistant', this.pendingResponseText);
@@ -465,6 +504,11 @@ export class CoreController {
     // LiveAPI音声チャンクをクリア（ショップ時はCloud TTSを使うため）
     this.pendingResponseText = '';
     this.pendingAudioChunks = [];
+
+    // ショップ表示後にGeminiが生成する遅延音声応答を抑制
+    // （Cloud TTSで既にお店紹介済みのため不要）
+    this.suppressNextLiveAudio = true;
+
     this.isProcessing = false;
     this.resetInputState();
   }
