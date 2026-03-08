@@ -321,11 +321,16 @@ export class CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // 初期メッセージ: サーバーから返されたものを画面表示（音声はLiveAPIが喋る）
+      // 初期メッセージ: サーバーから返されたものを優先（コンシェルジュモードの個別挨拶対応）
       const initialMsg = data.initial_message || this.t('initialGreeting');
       this.addMessage('assistant', initialMsg, null, true);
 
-      // ショップカード紹介用のTTSを事前生成（LiveAPI接続と並行）
+      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
+      const initialTtsPromise = data.initial_tts
+        ? this.playPreGeneratedTts(data.initial_tts)
+        : this.speakTextGCP(initialMsg);
+
+      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -348,8 +353,10 @@ export class CoreController {
         } catch (_e) { }
       });
 
-      // ack事前生成はバックグラウンドで実行（ブロックしない）
-      Promise.all(ackPromises).catch(() => {});
+      await Promise.all([
+        initialTtsPromise,
+        ...ackPromises
+      ]);
 
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
@@ -379,7 +386,7 @@ export class CoreController {
     // 事前生成済みの相槌TTS（"お調べします。"）を即座に再生
     const ackText = this.t('ackSearch');
     const ackAudio = this.preGeneratedAcks.get(ackText);
-    if (ackAudio && this.isTTSEnabled) {
+    if (ackAudio && this.isTTSEnabled && this.isUserInteracted) {
       console.log('[LiveAPI] Playing pre-generated ack:', ackText);
       this.isAISpeaking = true;
       this.ttsPlayer.src = `data:audio/mp3;base64,${ackAudio}`;
@@ -476,7 +483,7 @@ export class CoreController {
     this.pendingResponseText = '';
 
     // LiveAPIからのPCM音声を再生
-    if (this.pendingAudioChunks.length > 0 && this.isTTSEnabled) {
+    if (this.pendingAudioChunks.length > 0 && this.isTTSEnabled && this.isUserInteracted) {
       this.playLiveAudioChunks(this.pendingAudioChunks);
     } else {
       this.isAISpeaking = false;
@@ -517,7 +524,7 @@ export class CoreController {
       }
 
       // ショップカード紹介はCloud TTS（REST維持）
-      if (ttsAudio && this.isTTSEnabled) {
+      if (ttsAudio && this.isTTSEnabled && this.isUserInteracted) {
         this.isAISpeaking = true;
         this.ttsPlayer.src = `data:audio/mp3;base64,${ttsAudio}`;
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
@@ -720,7 +727,6 @@ export class CoreController {
   // ========================================
 
   protected async sendMessage() {
-    this.enableAudioPlayback();
     this.unlockAudioParams();
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
@@ -736,7 +742,7 @@ export class CoreController {
       if (textLength < 2) {
            const msg = this.t('shortMsgWarning');
            this.addMessage('assistant', msg);
-           if (this.isTTSEnabled) await this.speakTextGCP(msg, true);
+           if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(msg, true);
            this.resetInputState();
            return;
       }
@@ -817,10 +823,15 @@ export class CoreController {
         resolve();
       };
 
-      this.ttsPlayer.play().catch(() => {
+      if (this.isUserInteracted) {
+        this.ttsPlayer.play().catch(() => {
+          this.isAISpeaking = false;
+          resolve();
+        });
+      } else {
         this.isAISpeaking = false;
         resolve();
-      });
+      }
     });
   }
 
@@ -875,14 +886,15 @@ export class CoreController {
           };
         });
 
-        this.lastAISpeech = this.normalizeText(cleanText);
-        try {
+        if (this.isUserInteracted) {
+          this.lastAISpeech = this.normalizeText(cleanText);
           await this.ttsPlayer.play();
           await playPromise;
-        } catch {
-          this.isAISpeaking = false;
+        } else {
+          this.showClickPrompt();
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
+          this.isAISpeaking = false;
         }
       } else {
         this.isAISpeaking = false;

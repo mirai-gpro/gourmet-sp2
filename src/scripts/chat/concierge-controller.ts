@@ -67,11 +67,16 @@ export class ConciergeController extends CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // バックエンドからの初回メッセージを画面表示（音声はLiveAPIが喋る）
+      // バックエンドからの初回メッセージを使用（長期記憶対応）
       const greetingText = data.initial_message || this.t('initialGreetingConcierge');
       this.addMessage('assistant', greetingText, null, true);
 
-      // ショップカード紹介用のTTSを事前生成（LiveAPI接続と並行）
+      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
+      const initialTtsPromise = data.initial_tts
+        ? this.playPreGeneratedTts(data.initial_tts)
+        : this.speakTextGCP(greetingText);
+
+      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -94,8 +99,10 @@ export class ConciergeController extends CoreController {
         } catch (_e) { }
       });
 
-      // ack事前生成はバックグラウンドで実行（ブロックしない）
-      Promise.all(ackPromises).catch(() => {});
+      await Promise.all([
+        initialTtsPromise,
+        ...ackPromises
+      ]);
 
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
