@@ -135,6 +135,7 @@ def build_live_config(system_prompt):
         "input_audio_transcription": {},
         "output_audio_transcription": {},
         "speech_config": {
+            "language_code": "ja-JP",
             "voice_config": {
                 "prebuilt_voice_config": {
                     "voice_name": "Aoede"
@@ -148,6 +149,11 @@ def build_live_config(system_prompt):
                 "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
                 "prefix_padding_ms": 500,
                 "silence_duration_ms": 500,
+            }
+        },
+        "context_window_compression": {
+            "sliding_window": {
+                "target_tokens": 32000,
             }
         },
         "tools": [SEARCH_TOOL],
@@ -312,7 +318,7 @@ class LiveSession:
                 error_msg = str(e).lower()
                 logger.error(f"[LiveSession] Session error (#{self.session_count}): {e}")
 
-                if any(kw in error_msg for kw in ["1008", "1011", "internal error", "disconnected", "closed", "websocket"]):
+                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed", "websocket"]):
                     logger.info("[LiveSession] Reconnectable error. Retrying in 3s...")
                     self.needs_reconnect = True
                     await asyncio.sleep(3)
@@ -430,7 +436,7 @@ class LiveSession:
                 error_msg = str(e).lower()
                 logger.error(f"[LiveSession] Receive error: {e}")
                 # 切断エラーは再接続で対応
-                if any(kw in error_msg for kw in ["1008", "1011", "internal error", "disconnected", "closed"]):
+                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed"]):
                     self.needs_reconnect = True
                 else:
                     self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
