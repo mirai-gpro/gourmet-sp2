@@ -17,6 +17,7 @@ export class CoreController {
   protected currentStage = 'conversation';
   protected isRecording = false;
   protected waitOverlayTimer: number | null = null;
+  protected waitingMessageTimer: number | null = null;
   protected isTTSEnabled = true;
   protected isUserInteracted = false;
   protected currentShops: any[] = [];
@@ -333,7 +334,7 @@ export class CoreController {
       // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
-        this.t('ackYes'), this.t('ttsIntro')
+        this.t('ackYes'), this.t('ttsIntro'), this.t('additionalResponse')
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
@@ -398,6 +399,39 @@ export class CoreController {
         this.isAISpeaking = false;
       };
       this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+    }
+
+    // 5秒後に「只今お店の情報を確認中です。もう少々お待ちください」を再生
+    this.clearWaitingMessageTimer();
+    this.waitingMessageTimer = window.setTimeout(() => {
+      // まだウエイティング中なら追加メッセージを再生
+      if (!this.els.waitOverlay.classList.contains('hidden')) {
+        const waitMsg = this.t('additionalResponse');
+        const waitAudio = this.preGeneratedAcks.get(waitMsg);
+        if (waitAudio && this.isTTSEnabled && this.isUserInteracted) {
+          console.log('[LiveAPI] Playing waiting message:', waitMsg);
+          this.isAISpeaking = true;
+          this.ttsPlayer.src = `data:audio/mp3;base64,${waitAudio}`;
+          this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+          this.els.voiceStatus.className = 'voice-status speaking';
+          this.ttsPlayer.onended = () => {
+            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+            this.els.voiceStatus.className = 'voice-status stopped';
+            this.isAISpeaking = false;
+          };
+          this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+        } else if (this.isTTSEnabled && this.isUserInteracted) {
+          // 事前生成がない場合はリアルタイムTTS
+          this.speakTextGCP(waitMsg, true);
+        }
+      }
+    }, 5000);
+  }
+
+  protected clearWaitingMessageTimer() {
+    if (this.waitingMessageTimer) {
+      clearTimeout(this.waitingMessageTimer);
+      this.waitingMessageTimer = null;
     }
   }
 
@@ -914,6 +948,7 @@ export class CoreController {
 
   protected hideWaitOverlay() {
     if (this.waitOverlayTimer) { clearTimeout(this.waitOverlayTimer); this.waitOverlayTimer = null; }
+    this.clearWaitingMessageTimer();
     this.els.waitOverlay.classList.add('hidden');
     setTimeout(() => this.els.waitVideo.pause(), 500);
   }
