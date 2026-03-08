@@ -16,6 +16,7 @@ pnpm-debug.log*
 # environment variables
 .env
 .env.production
+.env.deploy
 
 # macOS-specific files
 .DS_Store
@@ -24,3 +25,11 @@ pnpm-debug.log*
 .idea/
 
 .vercel
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# GCP credentials (never commit)
+hp-support-*.json

@@ -1,0 +1,20 @@
+# FastAPI + Uvicorn
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Twilio
+twilio==8.13.0
+
+# Google Cloud
+google-cloud-speech==2.23.0
+google-cloud-texttospeech==2.16.0
+google-generativeai==0.3.2
+
+# その他
+python-multipart==0.0.6
+websockets==12.0
+httpx==0.27.0
+
+# ローカル音声テスト用
+pyaudio==0.2.14
+pygame==2.5.2  # MP3音声再生用
