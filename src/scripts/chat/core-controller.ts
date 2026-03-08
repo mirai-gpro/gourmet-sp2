@@ -353,11 +353,10 @@ export class CoreController {
         } catch (_e) { }
       });
 
-      await Promise.all([
-        initialTtsPromise,
-        ...ackPromises
-      ]);
+      // LiveAPI WebSocket接続をTTS完了待ちせず即座に開始（応答速度改善）
+      this.initLiveConnection();
 
+      // UI有効化もTTS完了前に行う
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
@@ -365,8 +364,11 @@ export class CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // LiveAPI WebSocket接続
-      this.initLiveConnection();
+      // TTS再生とack事前生成はバックグラウンドで完了を待つ
+      Promise.all([
+        initialTtsPromise,
+        ...ackPromises
+      ]).catch(e => console.warn('[Core] TTS background error:', e));
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);

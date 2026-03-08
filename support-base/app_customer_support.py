@@ -944,9 +944,26 @@ def live_websocket(ws, session_id):
     mode_prompts = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS.get('chat', {}))
     system_prompt = mode_prompts.get(language, mode_prompts.get('ja', ''))
 
+    # コンシェルジュモード: ユーザーコンテキストを構築（LiveAPIの初回挨拶用）
+    user_context = ''
+    if mode == 'concierge':
+        is_first_visit = session_data.get('is_first_visit', True)
+        profile = session_data.get('long_term_profile', {}) or {}
+        preferred_name = profile.get('preferred_name', '')
+        name_honorific = profile.get('name_honorific', '様')
+
+        if is_first_visit:
+            user_context = '初めてのユーザーです。「初めまして、AIコンシェルジュです。宜しければ、何とお呼びすればいいか教えて頂けますか？」のように自然に挨拶して、名前を聞いてください。'
+        elif preferred_name:
+            user_context = f'リピーターです。「お帰りなさいませ、{preferred_name}{name_honorific}。今日はどのようなお店をお探しでしょうか？」のように名前を呼んで挨拶してください。'
+        else:
+            user_context = 'リピーターですが名前未登録です。「いらっしゃいませ。今日はどのようなお店をお探しでしょうか？」のように挨拶してください。名前での呼びかけはしないでください。'
+
+        logger.info(f"[LiveAPI WS] Concierge context: first_visit={is_first_visit}, name={preferred_name}")
+
     # LiveAPIセッション作成・開始
     live_session = live_session_manager.create(
-        session_id, system_prompt, ws, language, mode
+        session_id, system_prompt, ws, language, mode, user_context
     )
 
     try:

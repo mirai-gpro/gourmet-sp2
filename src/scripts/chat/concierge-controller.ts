@@ -15,6 +15,8 @@ export class ConciergeController extends CoreController {
 
     // コンシェルジュモードに設定
     this.currentMode = 'concierge';
+    // コンシェルジュページへの遷移自体がユーザー操作 → 初期あいさつ自動再生を許可
+    this.isUserInteracted = true;
     this.init();
   }
 
@@ -99,11 +101,10 @@ export class ConciergeController extends CoreController {
         } catch (_e) { }
       });
 
-      await Promise.all([
-        initialTtsPromise,
-        ...ackPromises
-      ]);
+      // LiveAPI WebSocket接続をTTS完了待ちせず即座に開始（応答速度改善）
+      this.initLiveConnection();
 
+      // UI有効化もTTS完了前に行う（ユーザーが即座にテキスト入力可能に）
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
@@ -111,8 +112,11 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // LiveAPI WebSocket接続
-      this.initLiveConnection();
+      // TTS再生とack事前生成はバックグラウンドで完了を待つ
+      Promise.all([
+        initialTtsPromise,
+        ...ackPromises
+      ]).catch(e => console.warn('[Concierge] TTS background error:', e));
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
