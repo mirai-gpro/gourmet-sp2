@@ -761,17 +761,11 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'build_version': '5904ae5-live',
-        'live_api_model': 'gemini-2.5-flash-native-audio-preview-12-2025',
-        'websocket_endpoint': '/ws/live/<session_id>',
-        'active_live_sessions': len(live_session_manager.sessions),
         'services': {
             'gemini': 'ok',
             'ram_session': 'ok',
             'tts': 'ok',
             'stt': 'ok',
-            'live_api': 'ok',
-            'flask_sock': 'ok',
             'places_api': 'ok' if GOOGLE_PLACES_API_KEY else 'not configured',
             'audio2exp': 'ok' if AUDIO2EXP_SERVICE_URL else 'not configured'
         }
@@ -933,7 +927,7 @@ def live_websocket(ws, session_id):
     LiveAPI WebSocket エンドポイント
     ブラウザ WebSocket ↔ バックエンド ↔ Gemini LiveAPI WebSocket
     """
-    logger.info(f"[LiveAPI WS] ★ WebSocket接続受信: session={session_id}, remote={request.remote_addr}")
+    logger.info(f"[LiveAPI WS] 接続: session={session_id}")
 
     # セッション情報を取得
     session = SupportSession(session_id)

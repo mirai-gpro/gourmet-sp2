@@ -5,10 +5,6 @@ import { i18n } from '../../constants/i18n';
 import { AudioManager } from './audio-manager';
 import { LiveWebSocket, OUTPUT_SAMPLE_RATE } from './live-websocket';
 
-// ビルドバージョン（デプロイ確認用）
-const BUILD_VERSION = '5904ae5-live';
-const BUILD_TIMESTAMP = '2026-03-08';
-
 export class CoreController {
   protected container: HTMLElement;
   protected apiBase: string;
@@ -84,7 +80,7 @@ export class CoreController {
   }
 
   protected async init() {
-    console.log(`[Core] Starting initialization... (build=${BUILD_VERSION}, ts=${BUILD_TIMESTAMP})`);
+    console.log('[Core] Starting initialization...');
 
     this.bindEvents();
 
@@ -248,11 +244,7 @@ export class CoreController {
 
   // LiveAPI WebSocket接続を初期化
   protected initLiveConnection() {
-    console.log(`[Core] initLiveConnection called: sessionId=${this.sessionId}, apiBase=${this.apiBase}`);
-    if (!this.sessionId) {
-      console.warn('[Core] initLiveConnection skipped: no sessionId');
-      return;
-    }
+    if (!this.sessionId) return;
 
     // 既存接続を切断
     if (this.liveWs) {
@@ -261,7 +253,6 @@ export class CoreController {
 
     this.liveReady = false;
 
-    try {
     this.liveWs = new LiveWebSocket(this.apiBase, this.sessionId, {
       onReady: () => {
         console.log('[LiveAPI] Ready');
@@ -303,10 +294,6 @@ export class CoreController {
     });
 
     this.liveWs.connect();
-    console.log('[Core] LiveWebSocket created and connect() called');
-    } catch (e) {
-      console.error('[Core] initLiveConnection error:', e);
-    }
   }
 
   // 後方互換性のためinitSocketをinitLiveConnectionにリダイレクト
