@@ -148,11 +148,6 @@ def build_live_config(system_prompt):
                 "silence_duration_ms": 500,
             }
         },
-        "context_window_compression": {
-            "sliding_window": {
-                "target_tokens": 32000,
-            }
-        },
         "tools": [SEARCH_TOOL],
     }
 
