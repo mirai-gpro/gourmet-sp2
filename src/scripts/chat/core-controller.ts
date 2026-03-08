@@ -5,10 +5,6 @@ import { i18n } from '../../constants/i18n';
 import { AudioManager } from './audio-manager';
 import { LiveWebSocket, OUTPUT_SAMPLE_RATE } from './live-websocket';
 
-// ビルドバージョン（デプロイ確認用）
-const BUILD_VERSION = '5904ae5-live';
-const BUILD_TIMESTAMP = '2026-03-08';
-
 export class CoreController {
   protected container: HTMLElement;
   protected apiBase: string;
@@ -84,15 +80,9 @@ export class CoreController {
   }
 
   protected async init() {
-    console.log(`[Core] Starting initialization... (build=${BUILD_VERSION}, ts=${BUILD_TIMESTAMP})`);
+    console.log('[Core] Starting initialization...');
 
     this.bindEvents();
-
-    // スプラッシュ画面タップで音声再生を解除
-    if (this.els.splashOverlay) {
-      this.els.splashOverlay.addEventListener('click', () => this.enableAudioPlayback(), { once: true });
-      this.els.splashOverlay.addEventListener('touchstart', () => this.enableAudioPlayback(), { once: true });
-    }
 
     setTimeout(() => {
         if (this.els.splashVideo) this.els.splashVideo.loop = false;
@@ -201,7 +191,6 @@ export class CoreController {
 
     const floatingButtons = this.container.querySelector('.floating-buttons');
     this.els.userInput?.addEventListener('focus', () => {
-      this.enableAudioPlayback();  // テキスト入力フォーカスでも音声再生を解除
       setTimeout(() => { if (floatingButtons) floatingButtons.classList.add('keyboard-active'); }, 300);
     });
     this.els.userInput?.addEventListener('blur', () => {
@@ -255,11 +244,7 @@ export class CoreController {
 
   // LiveAPI WebSocket接続を初期化
   protected initLiveConnection() {
-    console.log(`[Core] initLiveConnection called: sessionId=${this.sessionId}, apiBase=${this.apiBase}`);
-    if (!this.sessionId) {
-      console.warn('[Core] initLiveConnection skipped: no sessionId');
-      return;
-    }
+    if (!this.sessionId) return;
 
     // 既存接続を切断
     if (this.liveWs) {
@@ -268,15 +253,10 @@ export class CoreController {
 
     this.liveReady = false;
 
-    try {
     this.liveWs = new LiveWebSocket(this.apiBase, this.sessionId, {
       onReady: () => {
         console.log('[LiveAPI] Ready');
         this.liveReady = true;
-        // 再接続時に音声抑制フラグをリセット（ショップ表示後の抑制が残っていると音声が出ない）
-        this.suppressNextLiveAudio = false;
-        this.pendingAudioChunks = [];
-        this.pendingResponseText = '';
       },
       onText: (text: string) => {
         this.handleLiveText(text);
@@ -314,10 +294,6 @@ export class CoreController {
     });
 
     this.liveWs.connect();
-    console.log('[Core] LiveWebSocket created and connect() called');
-    } catch (e) {
-      console.error('[Core] initLiveConnection error:', e);
-    }
   }
 
   // 後方互換性のためinitSocketをinitLiveConnectionにリダイレクト
@@ -410,7 +386,7 @@ export class CoreController {
     // 事前生成済みの相槌TTS（"お調べします。"）を即座に再生
     const ackText = this.t('ackSearch');
     const ackAudio = this.preGeneratedAcks.get(ackText);
-    if (ackAudio && this.isTTSEnabled && this.isUserInteracted) {
+    if (ackAudio && this.isTTSEnabled) {
       console.log('[LiveAPI] Playing pre-generated ack:', ackText);
       this.isAISpeaking = true;
       this.ttsPlayer.src = `data:audio/mp3;base64,${ackAudio}`;
@@ -428,16 +404,6 @@ export class CoreController {
   protected handleLiveText(text: string) {
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
     if (!this.suppressNextLiveAudio) {
-      // JSON応答が混入した場合はmessageフィールドのみ抽出
-      if (text.trim().startsWith('{') && text.includes('"message"')) {
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed.message) {
-            this.pendingResponseText += parsed.message;
-            return;
-          }
-        } catch (_) { /* JSONパース失敗: そのまま蓄積 */ }
-      }
       this.pendingResponseText += text;
     }
   }
@@ -487,8 +453,6 @@ export class CoreController {
     this.hideWaitOverlay();
     this.finalizeUserTranscript();
 
-    console.log(`[LiveAPI] TurnComplete: text=${this.pendingResponseText.length}chars, audio=${this.pendingAudioChunks.length}chunks, suppress=${this.suppressNextLiveAudio}, tts=${this.isTTSEnabled}, interacted=${this.isUserInteracted}`);
-
     // ショップ表示後のLiveAPI音声ターンは完全スキップ
     if (this.suppressNextLiveAudio) {
       this.suppressNextLiveAudio = false;
@@ -519,7 +483,7 @@ export class CoreController {
     this.pendingResponseText = '';
 
     // LiveAPIからのPCM音声を再生
-    if (this.pendingAudioChunks.length > 0 && this.isTTSEnabled && this.isUserInteracted) {
+    if (this.pendingAudioChunks.length > 0 && this.isTTSEnabled) {
       this.playLiveAudioChunks(this.pendingAudioChunks);
     } else {
       this.isAISpeaking = false;
@@ -560,7 +524,7 @@ export class CoreController {
       }
 
       // ショップカード紹介はCloud TTS（REST維持）
-      if (ttsAudio && this.isTTSEnabled && this.isUserInteracted) {
+      if (ttsAudio && this.isTTSEnabled) {
         this.isAISpeaking = true;
         this.ttsPlayer.src = `data:audio/mp3;base64,${ttsAudio}`;
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
@@ -764,6 +728,7 @@ export class CoreController {
 
   protected async sendMessage() {
     this.enableAudioPlayback();
+    this.unlockAudioParams();
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
 
@@ -778,7 +743,7 @@ export class CoreController {
       if (textLength < 2) {
            const msg = this.t('shortMsgWarning');
            this.addMessage('assistant', msg);
-           if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(msg, true);
+           if (this.isTTSEnabled) await this.speakTextGCP(msg, true);
            this.resetInputState();
            return;
       }
@@ -859,15 +824,10 @@ export class CoreController {
         resolve();
       };
 
-      if (this.isUserInteracted) {
-        this.ttsPlayer.play().catch(() => {
-          this.isAISpeaking = false;
-          resolve();
-        });
-      } else {
+      this.ttsPlayer.play().catch(() => {
         this.isAISpeaking = false;
         resolve();
-      }
+      });
     });
   }
 
@@ -922,15 +882,14 @@ export class CoreController {
           };
         });
 
-        if (this.isUserInteracted) {
-          this.lastAISpeech = this.normalizeText(cleanText);
+        this.lastAISpeech = this.normalizeText(cleanText);
+        try {
           await this.ttsPlayer.play();
           await playPromise;
-        } else {
-          this.showClickPrompt();
+        } catch {
+          this.isAISpeaking = false;
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
-          this.isAISpeaking = false;
         }
       } else {
         this.isAISpeaking = false;
