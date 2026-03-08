@@ -65,10 +65,22 @@ SEARCH_TOOL = {
 # LiveAPI 用プロンプト補足（音声会話向け UX フロー指示）
 LIVE_API_PROMPT_SUPPLEMENT = """
 
+## 【最重要】セッション開始時の初期挨拶
+
+セッション接続直後、あなたから最初に挨拶してください。
+システムプロンプトにユーザー情報が含まれている場合はそれに応じた挨拶をしてください:
+
+- ユーザー名がある場合: 「お帰りなさいませ、○○さん。今日はどのようなお店をお探しですか？」
+- 初回訪問の場合: 「初めまして、AIコンシェルジュです。よろしければ、お名前を教えていただけますか？」
+- 名前未登録のリピーター: 「いらっしゃいませ。今日はどんなお店をお探しですか？」
+- チャットモード: 「こんにちは！グルメサポートAIです。どのようなお店をお探しですか？」
+
+挨拶は1〜2文で簡潔に。長い自己紹介は不要。
+
 ## 【最重要】応答の簡潔さルール
 
-- **1回の発話は50文字以内を目標にする**（検索結果紹介を除く）
-- **1ターンで聞く質問は最大2つまで**。3つ以上を同時に聞かない
+- 1回の発話は50文字以内を目標にする（検索結果紹介を除く）
+- 1ターンで聞く質問は最大2つまで。3つ以上を同時に聞かない
 - ヒアリング項目が複数残っていても、1〜2個ずつ段階的に聞く
 - 余計な前置き・繰り返し・丁寧すぎる表現は省く
 
@@ -82,23 +94,32 @@ LIVE_API_PROMPT_SUPPLEMENT = """
 - ✕「ご予算はいかがでしょうか？コースでお考えか、アラカルトで注文して合計で一人当たり、いくらくらいか？、など目安があれば教えてください。」
 - ○「予算はどのくらいですか？」
 
+## 【最重要】テキスト出力のフォーマットルール
+
+- 応答にアスタリスク（*）を絶対に使わないこと。太字・イタリック・強調はすべて禁止
+- 「***」「**」「*」はすべて禁止。音声読み上げで不自然になるため
+- 強調したい場合は、言葉の選び方や語順で表現する
+
 ## 【重要】LiveAPI 音声会話モードの応答ルール
 
 あなたは音声で直接ユーザーと会話しています。JSON形式ではなく、自然な話し言葉で応答してください。
 
 ### レストラン検索時の応答フロー（必ず守ること）
 
-ユーザーがお店探しをリクエストした場合、**必ず以下の順序で応答してください**:
+ユーザーがお店探しをリクエストした場合、必ず以下の順序で応答してください:
 
-1. **復唱+お待ち（必須）**: ユーザーのリクエストを短く復唱し、検索する旨を伝える（1文で）
+1. 復唱+お待ち（必須・最重要）: ユーザーのリクエスト内容を具体的に復唱し、検索する旨を伝える
+   - 必ずユーザーが言ったエリア名・料理ジャンル・条件を含めて復唱すること
    - 例: 「恵比寿で焼き鳥ですね、お探しします！」
-   - 例: 「渋谷のイタリアンですね、少々お待ちください。」
-   - 例: 「かしこまりました。新宿で和食ですね、お調べします。」
-   - **この復唱は必ず声に出してから**ツールを呼び出すこと
+   - 例: 「渋谷の落ち着いたイタリアンですね、少々お待ちください。」
+   - 例: 「かしこまりました。新宿で5人の忘年会向けの和食ですね、お調べします。」
+   - 例: 「銀座でデート向けのフレンチ、予算一万円ですね、お探しします。」
+   - 「お調べします」だけの応答は禁止。必ずリクエスト内容を含めること
+   - この復唱は必ず声に出してからツールを呼び出すこと
 
-2. **ツール呼び出し**: 上記を話した後に search_restaurants を呼び出す
+2. ツール呼び出し: 上記を話した後に search_restaurants を呼び出す
 
-3. **検索結果の紹介**: ツール結果を受け取った後、簡潔に紹介する
+3. 検索結果の紹介: ツール結果を受け取った後、簡潔に紹介する
    - 例: 「見つかりました。画面のカードをご覧ください。」
    - ※詳しい説明は別途システムが読み上げるので、ここでは短くまとめる
 
@@ -132,7 +153,6 @@ def build_live_config(system_prompt):
         "input_audio_transcription": {},
         "output_audio_transcription": {},
         "speech_config": {
-            "language_code": "ja-JP",
             "voice_config": {
                 "prebuilt_voice_config": {
                     "voice_name": "Aoede"
@@ -310,7 +330,7 @@ class LiveSession:
                 error_msg = str(e).lower()
                 logger.error(f"[LiveSession] Session error (#{self.session_count}): {e}")
 
-                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed", "websocket"]):
+                if any(kw in error_msg for kw in ["1008", "1011", "internal error", "disconnected", "closed", "websocket"]):
                     logger.info("[LiveSession] Reconnectable error. Retrying in 3s...")
                     self.needs_reconnect = True
                     await asyncio.sleep(3)
@@ -428,7 +448,7 @@ class LiveSession:
                 error_msg = str(e).lower()
                 logger.error(f"[LiveSession] Receive error: {e}")
                 # 切断エラーは再接続で対応
-                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed"]):
+                if any(kw in error_msg for kw in ["1008", "1011", "internal error", "disconnected", "closed"]):
                     self.needs_reconnect = True
                 else:
                     self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
@@ -463,7 +483,7 @@ class LiveSession:
                 response_text = result.get('response', '')
                 tts_audio = result.get('tts_audio', '')
 
-                # ショップデータをブラウザに送信
+                # ショップデータ + TTS を一括送信（TTS は検索と並行生成済み）
                 self._ws_send(json.dumps({
                     'type': 'shops',
                     'data': {
@@ -531,9 +551,9 @@ class LiveSession:
             ]
 
             # ====================================================
-            # 並行処理: enrichment + REST API 説明生成（遅延対策）
+            # 並行処理: enrichment + REST API 説明生成 + TTS（遅延対策）
             # ====================================================
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 enrich_future = executor.submit(
                     enrich_shops_with_photos, shops, area, language
                 )
@@ -542,20 +562,25 @@ class LiveSession:
                 )
 
                 # Gemini REST API は通常 enrichment より先に完了する
-                # → 完了次第 TTS 生成を開始（enrichment と並行）
                 descriptions = desc_future.result()
                 response_text = ''
                 if descriptions:
                     response_text = descriptions.get('message', '')
                     logger.info(f"[LiveSession] Gemini descriptions ready: {len(response_text)} chars")
 
-                # TTS 生成（enrichment がまだ実行中でもOK）
                 if not response_text:
                     response_text = self._build_shop_intro_text(shops, language)
-                tts_audio = self._generate_tts(response_text, language) if response_text else ''
+
+                # TTS 生成を別スレッドで開始（enrichment と完全並行）
+                tts_future = executor.submit(
+                    self._generate_tts, response_text, language
+                ) if response_text else None
 
                 # enrichment 完了を待つ
                 enriched_shops = enrich_future.result() or shops
+
+                # TTS 完了を待つ（enrichment 待ちの間に完了している可能性が高い）
+                tts_audio = tts_future.result() if tts_future else ''
 
             # 説明データを enriched shops にマージ
             if descriptions:
@@ -624,7 +649,8 @@ class LiveSession:
 重要:
 - messageの冒頭に「かしこまりました」等の返事とユーザーのリクエストの復唱を入れる
 - messageフィールド内の予算は漢数字（音声読み上げ対応）
-- 店舗名は**太字**
+- 店舗名は太字にしない（音声読み上げでアスタリスクが読まれるため）
+- messageフィールド内で「***」「**」「*」等のマークダウン記号を一切使用しないこと
 - 各店舗について料理の特徴、雰囲気、予算帯を含む2〜3文の説明
 - descriptions配列は検索結果と同じ順序・同じ件数で出力
 - JSONのみ出力（マークダウンコードブロック不要）"""
@@ -776,6 +802,22 @@ JSON 형식으로 출력:
 
         return text
 
+    @staticmethod
+    def _clean_text_for_tts(text):
+        """TTS用テキストクリーニング: マークダウン記号を除去し読み上げを自然にする"""
+        import re
+        # **太字** → 太字（アスタリスク読み上げ防止）
+        clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+        # *イタリック* → テキスト
+        clean = re.sub(r'\*([^*]+)\*', r'\1', clean)
+        # 残った孤立アスタリスクを除去
+        clean = clean.replace('***', '').replace('**', '').replace('*', '')
+        # 改行を句読点に変換（読み上げ用）
+        clean = clean.replace('\n\n', '。').replace('\n', '。')
+        # 連続する句読点を整理
+        clean = re.sub(r'。{2,}', '。', clean)
+        return clean.strip()
+
     def _generate_tts(self, text, language):
         """Cloud TTS で音声合成（ショップカード紹介用）"""
         try:
@@ -783,8 +825,11 @@ JSON 형식으로 출력:
 
             lang_code, voice_name = VOICE_MAP.get(language, VOICE_MAP['ja'])
 
+            # TTS 前にマークダウン記号を除去（アスタリスク読み上げ防止）
+            clean_text = self._clean_text_for_tts(text)
+
             tts_client = texttospeech.TextToSpeechClient()
-            synthesis_input = texttospeech.SynthesisInput(text=text[:1000])
+            synthesis_input = texttospeech.SynthesisInput(text=clean_text[:1000])
             voice = texttospeech.VoiceSelectionParams(
                 language_code=lang_code,
                 name=voice_name
