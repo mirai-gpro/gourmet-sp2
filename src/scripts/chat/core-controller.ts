@@ -273,6 +273,10 @@ export class CoreController {
       onReady: () => {
         console.log('[LiveAPI] Ready');
         this.liveReady = true;
+        // 再接続時に音声抑制フラグをリセット（ショップ表示後の抑制が残っていると音声が出ない）
+        this.suppressNextLiveAudio = false;
+        this.pendingAudioChunks = [];
+        this.pendingResponseText = '';
       },
       onText: (text: string) => {
         this.handleLiveText(text);
@@ -482,6 +486,8 @@ export class CoreController {
   protected handleLiveTurnComplete() {
     this.hideWaitOverlay();
     this.finalizeUserTranscript();
+
+    console.log(`[LiveAPI] TurnComplete: text=${this.pendingResponseText.length}chars, audio=${this.pendingAudioChunks.length}chunks, suppress=${this.suppressNextLiveAudio}, tts=${this.isTTSEnabled}, interacted=${this.isUserInteracted}`);
 
     // ショップ表示後のLiveAPI音声ターンは完全スキップ
     if (this.suppressNextLiveAudio) {

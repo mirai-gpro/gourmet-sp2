@@ -278,9 +278,11 @@ class LiveSession:
             config = build_live_config(self.system_prompt)
 
             # 再接続時はコンテキストをシステムプロンプトに追加
+            # 🚨 self.system_prompt には既に LIVE_API_PROMPT_SUPPLEMENT が含まれている
+            #    二重付加するとプロンプトが膨張してGeminiが不安定になる
             if context:
                 config["system_instruction"] = (
-                    self.system_prompt + LIVE_API_PROMPT_SUPPLEMENT +
+                    self.system_prompt +
                     f"\n\n## 【会話の継続】\n以下は直前の会話履歴です。自然に会話を続けてください。\n{context}"
                 )
 
@@ -296,6 +298,9 @@ class LiveSession:
 
                     if self.session_count == 1:
                         self._ws_send(json.dumps({'type': 'live_ready'}))
+                    else:
+                        # 再接続完了をフロントに通知（フロントで状態リセット可能に）
+                        self._ws_send(json.dumps({'type': 'live_ready', 'reconnected': True}))
                     logger.info(f"[LiveSession] Connected (#{self.session_count}): session={self.session_id}")
 
                     try:
@@ -305,11 +310,15 @@ class LiveSession:
                         )
                     except Exception as e:
                         if self.running:
-                            logger.error(f"[LiveSession] Loop error: {e}")
+                            logger.error(f"[LiveSession] Loop error (#{self.session_count}): {e}, needs_reconnect={self.needs_reconnect}")
 
                     # needs_reconnect が True なら再接続
                     if not self.needs_reconnect:
+                        logger.info(f"[LiveSession] Session ended normally (#{self.session_count}): session={self.session_id}")
                         break
+                    else:
+                        logger.info(f"[LiveSession] Reconnecting... (#{self.session_count} → #{self.session_count + 1}): "
+                                   f"ai_chars={self.ai_char_count}, history={len(self.conversation_history)} turns")
 
             except Exception as e:
                 error_msg = str(e).lower()
