@@ -33,6 +33,10 @@ export class CoreController {
   protected pendingAudioChunks: string[] = [];
   protected liveReady = false;
 
+  // ユーザー発話トランスクリプション蓄積用
+  protected pendingUserTranscript = '';
+  protected pendingUserMsgEl: HTMLElement | null = null;
+
   // バックグラウンド状態の追跡
   protected isInBackground = false;
   protected backgroundStartTime = 0;
@@ -153,6 +157,8 @@ export class CoreController {
     this.pendingAudioChunks = [];
     this.liveReady = false;
     this.suppressNextLiveAudio = false;
+    this.pendingUserTranscript = '';
+    this.pendingUserMsgEl = null;
 
     await new Promise(resolve => setTimeout(resolve, 300));
     await this.initializeSession();
@@ -310,14 +316,21 @@ export class CoreController {
       const res = await fetch(`${this.apiBase}/api/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_info: {}, language: this.currentLanguage })
+        body: JSON.stringify({ user_info: {}, language: this.currentLanguage, mode: this.currentMode })
       });
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      this.addMessage('assistant', this.t('initialGreeting'), null, true);
+      // 初期メッセージ: サーバーから返されたものを優先（コンシェルジュモードの個別挨拶対応）
+      const initialMsg = data.initial_message || this.t('initialGreeting');
+      this.addMessage('assistant', initialMsg, null, true);
 
-      // ショップカード紹介用のTTSを事前生成
+      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
+      const initialTtsPromise = data.initial_tts
+        ? this.playPreGeneratedTts(data.initial_tts)
+        : this.speakTextGCP(initialMsg);
+
+      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -341,7 +354,7 @@ export class CoreController {
       });
 
       await Promise.all([
-        this.speakTextGCP(this.t('initialGreeting')),
+        initialTtsPromise,
         ...ackPromises
       ]);
 
@@ -365,6 +378,8 @@ export class CoreController {
   // ========================================
 
   protected handleLiveSearching() {
+    // ユーザー発話を確定
+    this.finalizeUserTranscript();
     // 即座にウエイティングアニメーション表示
     this.showWaitOverlay();
 
@@ -394,11 +409,31 @@ export class CoreController {
   }
 
   protected handleLiveInputTranscription(text: string) {
-    // input_audio_transcription からのテキスト（ユーザー発話のテキスト版）
-    this.addMessage('user', text);
+    // input_audio_transcription フラグメントを蓄積して1つのバブルに表示
+    this.pendingUserTranscript += text;
+
+    if (this.pendingUserMsgEl) {
+      // 既存バブルを更新
+      const span = this.pendingUserMsgEl.querySelector('.message-text');
+      if (span) span.textContent = this.pendingUserTranscript;
+    } else {
+      // 新しいバブルを作成
+      this.pendingUserMsgEl = this.addMessageElement('user', this.pendingUserTranscript);
+    }
+    this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
+  }
+
+  // ユーザー発話トランスクリプションを確定
+  protected finalizeUserTranscript() {
+    if (this.pendingUserTranscript) {
+      this.pendingUserTranscript = '';
+      this.pendingUserMsgEl = null;
+    }
   }
 
   protected handleLiveAudio(base64: string) {
+    // AI音声受信 = ユーザー発話確定
+    this.finalizeUserTranscript();
     // ショップ表示後のLiveAPI音声は抑制（Cloud TTSで代替済み）
     if (this.suppressNextLiveAudio) return;
     this.pendingAudioChunks.push(base64);
@@ -416,6 +451,7 @@ export class CoreController {
 
   protected handleLiveTurnComplete() {
     this.hideWaitOverlay();
+    this.finalizeUserTranscript();
 
     // ショップ表示後のLiveAPI音声ターンは完全スキップ
     if (this.suppressNextLiveAudio) {
@@ -460,6 +496,7 @@ export class CoreController {
 
   protected handleLiveShops(data: { response: string; shops: any[]; ttsAudio?: string }) {
     this.hideWaitOverlay();
+    this.finalizeUserTranscript();
 
     const { response, shops, ttsAudio } = data;
 
@@ -763,6 +800,42 @@ export class CoreController {
   }
 
   // ========================================
+  // 事前生成済みTTS再生（サーバー側で生成済みの base64 MP3 を即時再生）
+  // ========================================
+
+  protected async playPreGeneratedTts(audioBase64: string): Promise<void> {
+    if (!this.isTTSEnabled || !audioBase64) return;
+
+    this.isAISpeaking = true;
+    this.ttsPlayer.src = `data:audio/mp3;base64,${audioBase64}`;
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+    this.els.voiceStatus.className = 'voice-status speaking';
+
+    return new Promise<void>((resolve) => {
+      this.ttsPlayer.onended = () => {
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.isAISpeaking = false;
+        resolve();
+      };
+      this.ttsPlayer.onerror = () => {
+        this.isAISpeaking = false;
+        resolve();
+      };
+
+      if (this.isUserInteracted) {
+        this.ttsPlayer.play().catch(() => {
+          this.isAISpeaking = false;
+          resolve();
+        });
+      } else {
+        this.isAISpeaking = false;
+        resolve();
+      }
+    });
+  }
+
+  // ========================================
   // Cloud TTS（ショップカード紹介用に維持）
   // ========================================
 
@@ -994,6 +1067,10 @@ export class CoreController {
   }
 
   protected addMessage(role: string, text: string, summary: string | null = null, isInitial: boolean = false) {
+    this.addMessageElement(role, text, isInitial);
+  }
+
+  protected addMessageElement(role: string, text: string, isInitial: boolean = false): HTMLElement {
     const div = document.createElement('div');
     div.className = `message ${role}`;
     if (isInitial) div.setAttribute('data-initial', 'true');
@@ -1002,6 +1079,7 @@ export class CoreController {
     div.innerHTML = `<div class="message-avatar">${role === 'assistant' ? '🍽' : '👤'}</div>${contentHtml}`;
     this.els.chatArea.appendChild(div);
     this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
+    return div;
   }
 
   protected resetInputState() {

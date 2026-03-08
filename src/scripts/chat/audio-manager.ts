@@ -4,7 +4,7 @@
 //
 // 設計方針:
 //   - クライアント側 VAD は使用しない
-//   - 無音検知は Gemini の automatic_activity_detection に完全委任
+//   - ターン検知は Gemini の automatic_activity_detection に委任
 //   - AudioWorklet で Float32 → Int16 PCM (16kHz mono) に変換
 //   - base64 エンコードしてコールバック経由で送信
 //

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import concurrent.futures
 
 from google import genai
 from google.genai import types
@@ -97,6 +98,23 @@ UPDATE_PROFILE_TOOL = {
 # ============================================================
 LIVE_API_PROMPT_SUPPLEMENT = """
 
+## 【最重要】応答の簡潔さルール
+
+- **1回の発話は50文字以内を目標にする**（検索結果紹介を除く）
+- **1ターンで聞く質問は最大2つまで**。3つ以上を同時に聞かない
+- ヒアリング項目が複数残っていても、1〜2個ずつ段階的に聞く
+- 余計な前置き・繰り返し・丁寧すぎる表現は省く
+
+### 簡潔な応答例
+- ✕「ありがとうございます！それでは、どのエリアでお探しでしょうか？また、女子会や会食など、どのような目的でのご利用ですか？」
+- ○「どのエリアで、どんな目的ですか？」
+
+- ✕「ありがとうございます。料理のジャンルや、落ち着いた雰囲気・賑やかな雰囲気などのご希望はありますか？また、何名様でのご利用でしょうか？」
+- ○「ジャンルの希望はありますか？」
+
+- ✕「ご予算はいかがでしょうか？コースでお考えか、アラカルトで注文して合計で一人当たり、いくらくらいか？、など目安があれば教えてください。」
+- ○「予算はどのくらいですか？」
+
 ---
 ## 【最優先】LiveAPI 音声会話モード — 以下のルールが上記の全指示に優先します
 
@@ -115,8 +133,23 @@ LIVE_API_PROMPT_SUPPLEMENT = """
 - JSON、マークダウン、構造化テキストは一切出力しないでください
 - 1回の発話は簡潔に（長文は避ける）
 
+### レストラン検索時の応答フロー（必ず守ること）
+
+1. **復唱+お待ち（必須）**: ユーザーのリクエストを短く復唱し、検索する旨を伝える（1文で）
+   - 例: 「恵比寿で焼き鳥ですね、お探しします！」
+   - 例: 「渋谷のイタリアンですね、少々お待ちください。」
+   - 例: 「かしこまりました。新宿で和食ですね、お調べします。」
+   - **この復唱は必ず声に出してから**ツールを呼び出すこと
+
+2. **ツール呼び出し**: 上記を話した後に search_restaurants を呼び出す
+
+3. **検索結果の紹介**: ツール結果を受け取った後、簡潔に紹介する
+   - 例: 「見つかりました。画面のカードをご覧ください。」
+   - ※詳しい説明は別途システムが読み上げるので、ここでは短くまとめる
+
 ### 応答スタイル
-- 丁寧だが堅すぎない、親しみやすいコンシェルジュ口調
+- 親しみやすく簡潔なコンシェルジュ口調
+- 1回の発話は短く（長文は避ける）
 - 「えーっと」「そうですね」など自然なフィラーは適度に使ってOK
 - 金額を言う場合は漢数字で（「五千円」「一万二千円」）
 
@@ -138,15 +171,6 @@ LIVE_API_PROMPT_SUPPLEMENT = """
 
 ショップカードの作成・お店の詳細情報は **バックエンドが自動処理** します。
 あなたが JSON や shops 配列を生成する必要はありません。
-
-検索フロー:
-1. **復唱**: ユーザーのリクエスト内容を自然に復唱する
-   例: 「恵比寿で焼き鳥のお店をお探しですね！」
-2. **お待ちメッセージ**: 検索する旨を伝える
-   例: 「お調べしますので、少々お待ちください。」
-3. **ツール呼び出し**: search_restaurants ツールを呼び出す
-4. **結果紹介**: ツール結果を受けたら簡潔に紹介する
-   例: 「5件のお店が見つかりました。画面にカードが表示されていますので、ぜひご覧ください。気になるお店があればお気軽にお聞きくださいね。」
 
 ※ ショップカードの表示・お店の説明音声はシステムが自動生成します。
 ※ あなたは結果の件数と簡単な案内だけを話してください。
@@ -208,6 +232,7 @@ def build_live_config(system_prompt, mode='chat'):
     stt_stream.py との差異:
       - voice_name: "Aoede" を追加（グルメアプリ用の声）
       - tools: search_restaurants（全モード）+ update_user_profile（コンシェルジュのみ）
+      - automatic_activity_detection: HIGH感度（自動VADでターン検知）
       - prefix_padding_ms: 100（stt_stream.py 準拠）
     """
     # モード別ツール構成
@@ -258,6 +283,10 @@ class LiveSession:
       - _handle_tool_call → _handle_tool_call
     """
 
+    # セッション再接続の閾値（stt_stream.py 準拠）
+    MAX_AI_CHARS_BEFORE_RECONNECT = 800
+    LONG_SPEECH_THRESHOLD = 500
+
     def __init__(self, session_id, system_prompt, ws, language='ja', mode='chat',
                  user_context=''):
         self.session_id = session_id
@@ -279,6 +308,13 @@ class LiveSession:
         self.running = False
         self.thread = None
         self._ws_lock = threading.Lock()
+
+        # セッション再接続用（stt_stream.py 準拠）
+        self.ai_char_count = 0
+        self.needs_reconnect = False
+        self.session_count = 0
+        self.conversation_history = []
+        self.ai_transcript_buffer = ""
 
     def start(self):
         """バックグラウンドスレッドで LiveAPI セッションを開始"""
@@ -306,9 +342,40 @@ class LiveSession:
         finally:
             self.loop.close()
 
+    def _add_to_history(self, role, text):
+        """会話履歴に追加（stt_stream.py 準拠: 直近20ターン保持）"""
+        self.conversation_history.append({"role": role, "text": text})
+        if len(self.conversation_history) > 20:
+            self.conversation_history = self.conversation_history[-20:]
+
+    def _get_context_summary(self):
+        """会話履歴の要約を取得（stt_stream.py 準拠）"""
+        if not self.conversation_history:
+            return ""
+
+        recent = self.conversation_history[-10:]
+        summary_parts = []
+        for h in recent:
+            text = h['text'][:150]
+            summary_parts.append(f"{h['role']}: {text}")
+
+        summary = "\n".join(summary_parts)
+
+        # 最後のAI発言が質問なら強調
+        last_ai = None
+        for h in reversed(self.conversation_history):
+            if h['role'] == 'AI':
+                last_ai = h['text']
+                break
+
+        if last_ai and any(q in last_ai for q in ['?', '？', 'か?', 'か？']):
+            summary += f"\n\n【直前の質問（これに対する回答を待っています）】\n{last_ai[:200]}"
+
+        return summary
+
     async def _session_loop(self):
         """
-        Gemini LiveAPI メインセッションループ
+        Gemini LiveAPI メインセッションループ（再接続対応）
         stt_stream.py GeminiLiveApp.run → _session_loop 準拠
         """
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -316,47 +383,87 @@ class LiveSession:
             raise RuntimeError("GEMINI_API_KEY が設定されていません")
 
         client = genai.Client(api_key=api_key)
-        config = build_live_config(self.system_prompt, self.mode)
 
-        logger.info(f"[LiveSession] Connecting: model={LIVE_API_MODEL}, session={self.session_id}")
+        while self.running:
+            self.session_count += 1
+            self.ai_char_count = 0
+            self.needs_reconnect = False
 
-        async with client.aio.live.connect(
-            model=LIVE_API_MODEL,
-            config=config
-        ) as session:
-            self.gemini_session = session
-            self.audio_queue = asyncio.Queue(maxsize=5)
+            # 再接続時はコンテキストを引き継ぐ
+            context = None
+            if self.session_count > 1:
+                context = self._get_context_summary()
+                logger.info(f"[LiveSession] Reconnecting (#{self.session_count}): session={self.session_id}")
+                if context:
+                    logger.info(f"[LiveSession] Context: {context[:80]}...")
 
-            self._ws_send(json.dumps({'type': 'live_ready'}))
-            logger.info(f"[LiveSession] Connected: session={self.session_id}")
+            config = build_live_config(self.system_prompt, self.mode)
 
-            # LiveAPI仕様: モデルが先に話すにはダミーのユーザー発話が必要
-            # 公式ドキュメント推奨のワークアラウンド
-            await session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(text="こんにちは")]
-                ),
-                turn_complete=True
-            )
-            logger.info(f"[LiveSession] Initial trigger sent")
-
-            # stt_stream.py: TaskGroup で send_audio, receive, play_audio を並行実行
-            try:
-                await asyncio.gather(
-                    self._send_audio(session),
-                    self._receive(session)
+            # 再接続時はコンテキストをシステムプロンプトに追加
+            if context:
+                config["system_instruction"] = (
+                    self.system_prompt +
+                    f"\n\n## 【会話の継続】\n以下は直前の会話履歴です。自然に会話を続けてください。\n{context}"
                 )
+
+            logger.info(f"[LiveSession] Connecting (#{self.session_count}): model={LIVE_API_MODEL}, session={self.session_id}")
+
+            try:
+                async with client.aio.live.connect(
+                    model=LIVE_API_MODEL,
+                    config=config
+                ) as session:
+                    self.gemini_session = session
+                    self.audio_queue = asyncio.Queue(maxsize=5)
+
+                    if self.session_count == 1:
+                        self._ws_send(json.dumps({'type': 'live_ready'}))
+                    logger.info(f"[LiveSession] Connected (#{self.session_count}): session={self.session_id}")
+
+                    # LiveAPI仕様: モデルが先に話すにはダミーのユーザー発話が必要
+                    # 公式ドキュメント推奨のワークアラウンド（初回接続時のみ）
+                    if self.session_count == 1:
+                        await session.send_client_content(
+                            turns=types.Content(
+                                role="user",
+                                parts=[types.Part(text="こんにちは")]
+                            ),
+                            turn_complete=True
+                        )
+                        logger.info(f"[LiveSession] Initial trigger sent")
+
+                    try:
+                        await asyncio.gather(
+                            self._send_audio(session),
+                            self._receive(session)
+                        )
+                    except Exception as e:
+                        if self.running:
+                            logger.error(f"[LiveSession] Loop error: {e}")
+
+                    # needs_reconnect が True なら再接続
+                    if not self.needs_reconnect:
+                        break
+
             except Exception as e:
-                if self.running:
-                    logger.error(f"[LiveSession] Loop error: {e}")
+                error_msg = str(e).lower()
+                logger.error(f"[LiveSession] Session error (#{self.session_count}): {e}")
+
+                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed", "websocket"]):
+                    logger.info("[LiveSession] Reconnectable error. Retrying in 3s...")
+                    self.needs_reconnect = True
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
+                    break
 
     async def _send_audio(self, session):
         """
         キューから音声を取得して Gemini に送信
         stt_stream.py send_audio 準拠: session.send_realtime_input(audio=msg)
         """
-        while self.running:
+        while self.running and not self.needs_reconnect:
             try:
                 msg = await asyncio.wait_for(self.audio_queue.get(), timeout=0.1)
                 if msg is None:
@@ -371,10 +478,10 @@ class LiveSession:
     async def _receive(self, session):
         """
         Gemini からの応答を受信してブラウザにリレー
-        stt_stream.py receive_audio 準拠
+        stt_stream.py receive_audio 準拠（累積文字数管理付き）
         """
         try:
-            while self.running:
+            while self.running and not self.needs_reconnect:
                 turn = session.receive()
                 async for response in turn:
                     if not self.running:
@@ -392,7 +499,30 @@ class LiveSession:
 
                     # ターン完了（stt_stream.py: turn_complete）
                     if hasattr(sc, 'turn_complete') and sc.turn_complete:
+                        # AI発話の累積文字数チェック（stt_stream.py 準拠）
+                        if self.ai_transcript_buffer:
+                            ai_text = self.ai_transcript_buffer.strip()
+                            char_count = len(ai_text)
+                            self.ai_char_count += char_count
+                            remaining = self.MAX_AI_CHARS_BEFORE_RECONNECT - self.ai_char_count
+                            logger.info(f"[LiveSession] AI turn: {char_count}chars (total: {self.ai_char_count}, remaining: {remaining})")
+
+                            self._add_to_history('AI', ai_text)
+                            self.ai_transcript_buffer = ""
+
+                            # 長い発話 → 次で途切れるリスクが高い
+                            if char_count >= self.LONG_SPEECH_THRESHOLD:
+                                logger.info(f"[LiveSession] Long speech ({char_count} chars). Reconnecting.")
+                                self.needs_reconnect = True
+                            # 累積上限に近づいた
+                            elif self.ai_char_count >= self.MAX_AI_CHARS_BEFORE_RECONNECT:
+                                logger.info(f"[LiveSession] Char limit reached ({self.ai_char_count}). Reconnecting.")
+                                self.needs_reconnect = True
+
                         self._ws_send(json.dumps({'type': 'turn_complete'}))
+
+                        if self.needs_reconnect:
+                            return  # ループを抜けて再接続
 
                     # 割り込み検知（stt_stream.py: interrupted）
                     if hasattr(sc, 'interrupted') and sc.interrupted:
@@ -403,6 +533,7 @@ class LiveSession:
                     if hasattr(sc, 'input_transcription') and sc.input_transcription:
                         text = sc.input_transcription.text
                         if text:
+                            self._add_to_history('User', text)
                             self._ws_send(json.dumps({
                                 'type': 'input_transcription',
                                 'data': text
@@ -412,6 +543,7 @@ class LiveSession:
                     if hasattr(sc, 'output_transcription') and sc.output_transcription:
                         text = sc.output_transcription.text
                         if text:
+                            self.ai_transcript_buffer += text
                             self._ws_send(json.dumps({
                                 'type': 'text',
                                 'data': text
@@ -432,8 +564,13 @@ class LiveSession:
 
         except Exception as e:
             if self.running:
+                error_msg = str(e).lower()
                 logger.error(f"[LiveSession] Receive error: {e}")
-                self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
+                # 切断エラーは再接続で対応
+                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed"]):
+                    self.needs_reconnect = True
+                else:
+                    self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
 
     async def _handle_tool_call(self, session, tool_call):
         """
@@ -567,13 +704,12 @@ class LiveSession:
 
     def _execute_restaurant_search(self, query, area):
         """
-        HotPepper API で直接検索 → Google Places 等で enrichment
+        Google Places で実在店舗を検索 → enrichment + REST API で詳細説明生成
 
-        旧実装では support_core.process_user_message() 経由で REST Gemini API を
-        二重呼び出ししていたが、LiveAPI の Gemini が既に query/area を抽出済みのため不要。
-        これにより:
-          - 20秒→数秒に短縮（REST Gemini API 呼び出し削除）
-          - チャットモードのセッション不整合エラー解消
+        遅延対策（gourmet-support 移植）:
+          - enrichment と Gemini REST API 説明生成を並行実行
+          - Gemini が先に完了 → TTS生成開始（enrichment 完了を待たずに）
+          - enrichment 完了 → 結果をマージ
         """
         try:
             from api_integrations import (
@@ -595,20 +731,227 @@ class LiveSession:
                 logger.info(f"[LiveSession] Google Places: 0件 query='{query}' area='{area}'")
                 return {'shops': [], 'response': '', 'tts_audio': ''}
 
-            # Google Places / 食べログ / ぐるなび 等で enrichment
-            shops = enrich_shops_with_photos(shops, area, language) or []
+            # 説明生成用に基本情報を先行抽出（enrichment による変更前）
+            shop_basics = [
+                {'name': s.get('name', ''), 'area': s.get('area', '')}
+                for s in shops
+            ]
 
-            logger.info(f"[LiveSession] Search complete: {len(shops)} shops")
+            # ====================================================
+            # 並行処理: enrichment + REST API 説明生成（遅延対策）
+            # ====================================================
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                enrich_future = executor.submit(
+                    enrich_shops_with_photos, shops, area, language
+                )
+                desc_future = executor.submit(
+                    self._generate_shop_descriptions, shop_basics, query, language
+                )
 
-            # Cloud TTS でショップ紹介音声を生成（即時再生用）
-            intro_text = self._build_shop_intro_text(shops, language)
-            tts_audio = self._generate_tts(intro_text, language) if intro_text else ''
+                # Gemini REST API は通常 enrichment より先に完了する
+                # → 完了次第 TTS 生成を開始（enrichment と並行）
+                descriptions = desc_future.result()
+                response_text = ''
+                if descriptions:
+                    response_text = descriptions.get('message', '')
+                    logger.info(f"[LiveSession] Gemini descriptions ready: {len(response_text)} chars")
 
-            return {'shops': shops, 'response': intro_text, 'tts_audio': tts_audio}
+                # TTS 生成（enrichment がまだ実行中でもOK）
+                if not response_text:
+                    response_text = self._build_shop_intro_text(shops, language)
+                tts_audio = self._generate_tts(response_text, language) if response_text else ''
+
+                # enrichment 完了を待つ
+                enriched_shops = enrich_future.result() or shops
+
+            # 説明データを enriched shops にマージ
+            if descriptions:
+                desc_list = descriptions.get('descriptions', [])
+                for shop, desc in zip(enriched_shops, desc_list):
+                    if not isinstance(desc, dict):
+                        continue
+                    for key in ['description', 'highlights', 'tips',
+                                'specialty', 'atmosphere', 'features']:
+                        if desc.get(key):
+                            shop[key] = desc[key]
+
+            logger.info(f"[LiveSession] Search complete: {len(enriched_shops)} shops, "
+                       f"response={len(response_text)} chars")
+
+            return {'shops': enriched_shops, 'response': response_text, 'tts_audio': tts_audio}
 
         except Exception as e:
             logger.error(f"[LiveSession] Restaurant search error: {e}")
             return {'shops': [], 'response': '', 'tts_audio': ''}
+
+    def _generate_shop_descriptions(self, shop_basics, user_query, language):
+        """
+        Gemini REST API で各店舗の詳細説明を生成
+
+        shop_basics: [{'name': '...', 'area': '...'}, ...]
+        Returns: {'message': '...', 'descriptions': [...]} or None
+        """
+        try:
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                return None
+
+            client = genai.Client(api_key=api_key)
+
+            shop_info = []
+            for i, s in enumerate(shop_basics, 1):
+                shop_info.append(f"{i}. {s['name']} ({s['area']})")
+
+            shop_count = len(shop_basics)
+            shop_list_str = '\n'.join(shop_info)
+
+            if language == 'ja':
+                prompt = f"""以下のレストラン検索結果について、各店舗の紹介文を生成してください。
+
+ユーザーのリクエスト: {user_query}
+
+検索結果:
+{shop_list_str}
+
+以下のJSON形式で出力してください:
+{{
+  "message": "かしこまりました。〜ですね。おすすめの{shop_count}軒をご紹介します。\\n\\n1. **店舗名**（エリア）- 料理の特徴、予算帯、雰囲気を含む2〜3文の説明\\n\\n...(全{shop_count}店舗)\\n\\n気になるお店があれば、お気軽にお聞きください。",
+  "descriptions": [
+    {{
+      "description": "料理内容・体験価値・雰囲気を含む要約（2〜3文）",
+      "highlights": ["特徴1", "特徴2", "特徴3"],
+      "tips": "来店時のおすすめポイント",
+      "specialty": "看板メニューや得意料理",
+      "atmosphere": "雰囲気",
+      "features": "特色"
+    }}
+  ]
+}}
+
+重要:
+- messageの冒頭に「かしこまりました」等の返事とユーザーのリクエストの復唱を入れる
+- messageフィールド内の予算は漢数字（音声読み上げ対応）
+- 店舗名は**太字**
+- 各店舗について料理の特徴、雰囲気、予算帯を含む2〜3文の説明
+- descriptions配列は検索結果と同じ順序・同じ件数で出力
+- JSONのみ出力（マークダウンコードブロック不要）"""
+
+            elif language == 'en':
+                prompt = f"""Generate detailed descriptions for these restaurant search results.
+
+User request: {user_query}
+
+Results:
+{shop_list_str}
+
+Output as JSON only:
+{{
+  "message": "Here are {shop_count} recommended restaurants for you.\\n\\n1. **Name** (Area) - 2-3 sentence description with cuisine, price range, atmosphere...\\n\\n...(all {shop_count})\\n\\nFeel free to ask about any restaurant.",
+  "descriptions": [
+    {{
+      "description": "2-3 sentence summary",
+      "highlights": ["Feature 1", "Feature 2", "Feature 3"],
+      "tips": "Recommended point",
+      "specialty": "Signature dish",
+      "atmosphere": "Atmosphere",
+      "features": "Features"
+    }}
+  ]
+}}"""
+            elif language == 'zh':
+                prompt = f"""为以下餐厅搜索结果生成详细介绍。
+
+用户请求: {user_query}
+
+搜索结果:
+{shop_list_str}
+
+请以JSON格式输出:
+{{
+  "message": "好的，为您推荐{shop_count}家餐厅。\\n\\n1. **店名**（区域）- 2-3句介绍...\\n\\n请问有感兴趣的餐厅吗？",
+  "descriptions": [
+    {{
+      "description": "2-3句概述",
+      "highlights": ["特色1", "特色2", "特色3"],
+      "tips": "推荐要点",
+      "specialty": "招牌菜",
+      "atmosphere": "氛围",
+      "features": "特色"
+    }}
+  ]
+}}"""
+            elif language == 'ko':
+                prompt = f"""다음 레스토랑 검색 결과에 대한 상세 설명을 생성하세요.
+
+사용자 요청: {user_query}
+
+검색 결과:
+{shop_list_str}
+
+JSON 형식으로 출력:
+{{
+  "message": "알겠습니다. {shop_count}개의 레스토랑을 추천합니다.\\n\\n1. **이름** (지역) - 2-3문장 설명...\\n\\n궁금한 레스토랑이 있으시면 말씀해 주세요.",
+  "descriptions": [
+    {{
+      "description": "2-3문장 요약",
+      "highlights": ["특징1", "특징2", "특징3"],
+      "tips": "추천 포인트",
+      "specialty": "대표 메뉴",
+      "atmosphere": "분위기",
+      "features": "특색"
+    }}
+  ]
+}}"""
+            else:
+                prompt = f"Generate descriptions for: {shop_list_str}\nUser query: {user_query}"
+
+            logger.info(f"[LiveSession] Generating descriptions via REST API: {shop_count} shops")
+
+            response = client.models.generate_content(
+                model=REST_API_MODEL,
+                contents=prompt
+            )
+
+            text = response.text
+            if not text:
+                return None
+
+            # JSON パース（コードブロック除去対応）
+            clean = text.strip()
+            if clean.startswith('```'):
+                # ```json ... ``` を除去
+                first_nl = clean.find('\n')
+                last_fence = clean.rfind('```')
+                if first_nl > 0 and last_fence > first_nl:
+                    clean = clean[first_nl + 1:last_fence].strip()
+
+            start = clean.find('{')
+            if start < 0:
+                return None
+
+            brace_count = 0
+            end = -1
+            for idx in range(start, len(clean)):
+                if clean[idx] == '{':
+                    brace_count += 1
+                elif clean[idx] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end = idx + 1
+                        break
+
+            if end < 0:
+                return None
+
+            result = json.loads(clean[start:end])
+            logger.info(f"[LiveSession] Description generation success: "
+                       f"message={len(result.get('message', ''))} chars, "
+                       f"descriptions={len(result.get('descriptions', []))} items")
+            return result
+
+        except Exception as e:
+            logger.error(f"[LiveSession] Description generation error: {e}")
+            return None
 
     def _build_shop_intro_text(self, shops, language):
         """ショップ紹介テキストを構築（Cloud TTS用）"""
