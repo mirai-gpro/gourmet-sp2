@@ -29,6 +29,9 @@ export class CoreController {
   protected currentMode: 'chat' | 'concierge' = 'chat';
   protected suppressNextLiveAudio = false;
 
+  // 初期挨拶TTS（isUserInteracted前に保存、後から再生用）
+  protected pendingInitialTts: string | null = null;
+
   // LiveAPI応答蓄積用
   protected pendingResponseText = '';
   protected pendingAudioChunks: string[] = [];
@@ -84,6 +87,16 @@ export class CoreController {
     console.log('[Core] Starting initialization...');
 
     this.bindEvents();
+
+    // スプラッシュ画面タップで音声再生を有効化（ブラウザの自動再生制限対策）
+    if (this.els.splashOverlay) {
+      const splashClickHandler = () => {
+        this.enableAudioPlayback();
+        console.log('[Core] User interacted via splash screen');
+      };
+      this.els.splashOverlay.addEventListener('click', splashClickHandler);
+      this.els.splashOverlay.addEventListener('touchstart', splashClickHandler, { passive: true });
+    }
 
     setTimeout(() => {
         if (this.els.splashVideo) this.els.splashVideo.loop = false;
@@ -844,6 +857,13 @@ export class CoreController {
   protected async playPreGeneratedTts(audioBase64: string): Promise<void> {
     if (!this.isTTSEnabled || !audioBase64) return;
 
+    // ユーザー操作前の場合、音声データを保存して後から再生
+    if (!this.isUserInteracted) {
+      console.log('[TTS] User not interacted yet, saving initial TTS for later playback');
+      this.pendingInitialTts = audioBase64;
+      return;
+    }
+
     this.isAISpeaking = true;
     this.ttsPlayer.src = `data:audio/mp3;base64,${audioBase64}`;
     this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
@@ -860,16 +880,10 @@ export class CoreController {
         this.isAISpeaking = false;
         resolve();
       };
-
-      if (this.isUserInteracted) {
-        this.ttsPlayer.play().catch(() => {
-          this.isAISpeaking = false;
-          resolve();
-        });
-      } else {
+      this.ttsPlayer.play().catch(() => {
         this.isAISpeaking = false;
         resolve();
-      }
+      });
     });
   }
 
@@ -929,7 +943,9 @@ export class CoreController {
           await this.ttsPlayer.play();
           await playPromise;
         } else {
-          this.showClickPrompt();
+          // ユーザー操作前: 音声データを保存して後から再生
+          console.log('[TTS] User not interacted yet, saving TTS for later playback');
+          this.pendingInitialTts = data.audio;
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
@@ -967,6 +983,14 @@ export class CoreController {
       const clickPrompt = this.container.querySelector('.click-prompt');
       if (clickPrompt) clickPrompt.remove();
       this.unlockAudioParams();
+
+      // 初期挨拶TTSが保留されていたら再生
+      if (this.pendingInitialTts) {
+        const ttsData = this.pendingInitialTts;
+        this.pendingInitialTts = null;
+        console.log('[TTS] Playing deferred initial TTS');
+        this.playPreGeneratedTts(ttsData);
+      }
     }
   }
 
