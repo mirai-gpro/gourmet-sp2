@@ -316,14 +316,21 @@ export class CoreController {
       const res = await fetch(`${this.apiBase}/api/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_info: {}, language: this.currentLanguage })
+        body: JSON.stringify({ user_info: {}, language: this.currentLanguage, mode: this.currentMode })
       });
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      this.addMessage('assistant', this.t('initialGreeting'), null, true);
+      // 初期メッセージ: サーバーから返されたものを優先（コンシェルジュモードの個別挨拶対応）
+      const initialMsg = data.initial_message || this.t('initialGreeting');
+      this.addMessage('assistant', initialMsg, null, true);
 
-      // ショップカード紹介用のTTSを事前生成
+      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
+      const initialTtsPromise = data.initial_tts
+        ? this.playPreGeneratedTts(data.initial_tts)
+        : this.speakTextGCP(initialMsg);
+
+      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -347,7 +354,7 @@ export class CoreController {
       });
 
       await Promise.all([
-        this.speakTextGCP(this.t('initialGreeting')),
+        initialTtsPromise,
         ...ackPromises
       ]);
 
@@ -790,6 +797,42 @@ export class CoreController {
         this.resetInputState();
       }
     }
+  }
+
+  // ========================================
+  // 事前生成済みTTS再生（サーバー側で生成済みの base64 MP3 を即時再生）
+  // ========================================
+
+  protected async playPreGeneratedTts(audioBase64: string): Promise<void> {
+    if (!this.isTTSEnabled || !audioBase64) return;
+
+    this.isAISpeaking = true;
+    this.ttsPlayer.src = `data:audio/mp3;base64,${audioBase64}`;
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
+    this.els.voiceStatus.className = 'voice-status speaking';
+
+    return new Promise<void>((resolve) => {
+      this.ttsPlayer.onended = () => {
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.isAISpeaking = false;
+        resolve();
+      };
+      this.ttsPlayer.onerror = () => {
+        this.isAISpeaking = false;
+        resolve();
+      };
+
+      if (this.isUserInteracted) {
+        this.ttsPlayer.play().catch(() => {
+          this.isAISpeaking = false;
+          resolve();
+        });
+      } else {
+        this.isAISpeaking = false;
+        resolve();
+      }
+    });
   }
 
   // ========================================

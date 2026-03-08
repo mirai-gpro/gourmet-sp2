@@ -224,6 +224,37 @@ def start_session():
                 }
                 logger.info(f"[API] user_profile を返却: {response_data['user_profile']}")
 
+        # 初期メッセージの TTS を事前生成して返す（フロント側の TTS 呼び出し不要に）
+        try:
+            clean_text = initial_message.replace('**', '').replace('\n\n', '。').replace('\n', '。')
+            if len(clean_text) > 200:
+                clean_text = clean_text[:200]
+
+            voice_map = {
+                'ja': ('ja-JP', 'ja-JP-Chirp3-HD-Leda'),
+                'en': ('en-US', 'en-US-Studio-O'),
+                'zh': ('cmn-CN', 'cmn-CN-Wavenet-A'),
+                'ko': ('ko-KR', 'ko-KR-Wavenet-A')
+            }
+            lang_code, voice_name = voice_map.get(language, voice_map['ja'])
+
+            synthesis_input = texttospeech.SynthesisInput(text=clean_text)
+            voice = texttospeech.VoiceSelectionParams(
+                language_code=lang_code, name=voice_name
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3
+            )
+            tts_response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+            response_data['initial_tts'] = base64.b64encode(
+                tts_response.audio_content
+            ).decode('utf-8')
+            logger.info(f"[API] 初期メッセージTTS生成完了: {len(clean_text)}文字")
+        except Exception as tts_err:
+            logger.warning(f"[API] 初期メッセージTTS生成失敗: {tts_err}")
+
         return jsonify(response_data)
 
     except Exception as e:

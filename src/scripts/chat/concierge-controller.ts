@@ -71,7 +71,12 @@ export class ConciergeController extends CoreController {
       const greetingText = data.initial_message || this.t('initialGreetingConcierge');
       this.addMessage('assistant', greetingText, null, true);
 
-      // ショップカード紹介用のTTSを事前生成
+      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
+      const initialTtsPromise = data.initial_tts
+        ? this.playPreGeneratedTts(data.initial_tts)
+        : this.speakTextGCP(greetingText);
+
+      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -95,7 +100,7 @@ export class ConciergeController extends CoreController {
       });
 
       await Promise.all([
-        this.speakTextGCP(greetingText),
+        initialTtsPromise,
         ...ackPromises
       ]);
 
@@ -146,6 +151,15 @@ export class ConciergeController extends CoreController {
         originalOnEnded.call(this.ttsPlayer, event);
       }
     };
+  }
+
+  // コンシェルジュモード固有: 事前生成TTS再生にアバターアニメーション追加
+  protected async playPreGeneratedTts(audioBase64: string): Promise<void> {
+    if (this.els.avatarContainer) {
+      this.els.avatarContainer.classList.add('speaking');
+    }
+    await super.playPreGeneratedTts(audioBase64);
+    this.stopAvatarAnimation();
   }
 
   // コンシェルジュモード固有: アバターアニメーション制御
