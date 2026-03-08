@@ -379,7 +379,7 @@ export class CoreController {
     // 事前生成済みの相槌TTS（"お調べします。"）を即座に再生
     const ackText = this.t('ackSearch');
     const ackAudio = this.preGeneratedAcks.get(ackText);
-    if (ackAudio && this.isTTSEnabled && this.isUserInteracted) {
+    if (ackAudio && this.isTTSEnabled) {
       console.log('[LiveAPI] Playing pre-generated ack:', ackText);
       this.isAISpeaking = true;
       this.ttsPlayer.src = `data:audio/mp3;base64,${ackAudio}`;
@@ -476,7 +476,7 @@ export class CoreController {
     this.pendingResponseText = '';
 
     // LiveAPIからのPCM音声を再生
-    if (this.pendingAudioChunks.length > 0 && this.isTTSEnabled && this.isUserInteracted) {
+    if (this.pendingAudioChunks.length > 0 && this.isTTSEnabled) {
       this.playLiveAudioChunks(this.pendingAudioChunks);
     } else {
       this.isAISpeaking = false;
@@ -517,7 +517,7 @@ export class CoreController {
       }
 
       // ショップカード紹介はCloud TTS（REST維持）
-      if (ttsAudio && this.isTTSEnabled && this.isUserInteracted) {
+      if (ttsAudio && this.isTTSEnabled) {
         this.isAISpeaking = true;
         this.ttsPlayer.src = `data:audio/mp3;base64,${ttsAudio}`;
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
@@ -720,6 +720,7 @@ export class CoreController {
   // ========================================
 
   protected async sendMessage() {
+    this.enableAudioPlayback();
     this.unlockAudioParams();
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
@@ -735,7 +736,7 @@ export class CoreController {
       if (textLength < 2) {
            const msg = this.t('shortMsgWarning');
            this.addMessage('assistant', msg);
-           if (this.isTTSEnabled && this.isUserInteracted) await this.speakTextGCP(msg, true);
+           if (this.isTTSEnabled) await this.speakTextGCP(msg, true);
            this.resetInputState();
            return;
       }
@@ -816,15 +817,10 @@ export class CoreController {
         resolve();
       };
 
-      if (this.isUserInteracted) {
-        this.ttsPlayer.play().catch(() => {
-          this.isAISpeaking = false;
-          resolve();
-        });
-      } else {
+      this.ttsPlayer.play().catch(() => {
         this.isAISpeaking = false;
         resolve();
-      }
+      });
     });
   }
 
@@ -879,15 +875,14 @@ export class CoreController {
           };
         });
 
-        if (this.isUserInteracted) {
-          this.lastAISpeech = this.normalizeText(cleanText);
+        this.lastAISpeech = this.normalizeText(cleanText);
+        try {
           await this.ttsPlayer.play();
           await playPromise;
-        } else {
-          this.showClickPrompt();
+        } catch {
+          this.isAISpeaking = false;
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
-          this.isAISpeaking = false;
         }
       } else {
         this.isAISpeaking = false;
