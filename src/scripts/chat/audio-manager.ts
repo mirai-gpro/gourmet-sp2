@@ -277,8 +277,10 @@ export class AudioManager {
   /** iOS Safari のオーディオ自動再生制限を解除 */
   unlockAudioParams(el: HTMLAudioElement) {
     if (this.audioCtx?.state === 'suspended') this.audioCtx.resume();
-    // ブラウザの自動再生制限を解除（空のAudioContext resumeのみ）
-    // 注: el.play()/pause()によるunlockはレースコンディションを起こすため廃止
+    if (el) {
+      el.muted = true;
+      el.play().then(() => { el.pause(); el.currentTime = 0; el.muted = false; }).catch(() => {});
+    }
   }
 
   /** 全リソース解放（audio-streaming-code-review.md: resumeAudioContext 全リセット準拠） */

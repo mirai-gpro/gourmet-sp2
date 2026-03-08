@@ -79,7 +79,7 @@ export class ConciergeController extends CoreController {
       // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
-        this.t('ackYes'), this.t('ttsIntro'), this.t('additionalResponse')
+        this.t('ackYes'), this.t('ttsIntro')
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
