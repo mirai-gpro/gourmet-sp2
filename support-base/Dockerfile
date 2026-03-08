@@ -6,12 +6,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# アプリケーションファイルをコピー（3ファイル構成 + 長期記憶 + LiveAPI）
+# アプリケーションファイルをコピー（3ファイル構成 + 長期記憶）
 COPY app_customer_support.py .
 COPY support_core.py .
 COPY api_integrations.py .
 COPY long_term_memory.py .
-COPY live_session.py .
 COPY templates/ templates/
 COPY prompts/ prompts/
 
