@@ -418,19 +418,21 @@ class LiveSession:
 
                     if self.session_count == 1:
                         self._ws_send(json.dumps({'type': 'live_ready'}))
-                    logger.info(f"[LiveSession] Connected (#{self.session_count}): session={self.session_id}")
-
-                    # LiveAPI仕様: モデルが先に話すにはダミーのユーザー発話が必要
-                    # 公式ドキュメント推奨のワークアラウンド（初回接続時のみ）
-                    if self.session_count == 1:
-                        await session.send_client_content(
-                            turns=types.Content(
-                                role="user",
-                                parts=[types.Part(text="こんにちは")]
-                            ),
-                            turn_complete=True
-                        )
-                        logger.info(f"[LiveSession] Initial trigger sent")
+                        logger.info(f"[LiveSession] Connected (#{self.session_count}): session={self.session_id}")
+                    else:
+                        # stt_stream.py 準拠: 再接続時のみテキストで応答を促す
+                        logger.info(f"[LiveSession] Reconnected (#{self.session_count}): session={self.session_id}")
+                        try:
+                            await session.send_client_content(
+                                turns=types.Content(
+                                    role="user",
+                                    parts=[types.Part(text="続きをお願いします")]
+                                ),
+                                turn_complete=True
+                            )
+                            logger.info(f"[LiveSession] Reconnect trigger sent")
+                        except Exception as e:
+                            logger.warning(f"[LiveSession] Reconnect trigger error: {e}")
 
                     try:
                         await asyncio.gather(
@@ -1025,10 +1027,10 @@ JSON 형식으로 출력:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
                 msg = {"data": audio_bytes, "mime_type": "audio/pcm"}
-                asyncio.run_coroutine_threadsafe(
-                    self.audio_queue.put(msg),
-                    self.loop
-                )
+                # stt_stream.py 準拠: put_nowait() で溢れたら捨てる（ブロックしない）
+                self.audio_queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass  # stt_stream.py 準拠: 溢れたチャンクは破棄
             except Exception as e:
                 logger.error(f"[LiveSession] Audio queue error: {e}")
 
