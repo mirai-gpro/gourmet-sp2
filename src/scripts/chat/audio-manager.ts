@@ -18,8 +18,8 @@ const MAX_RECORDING_TIME = 60000;
 
 // iOS: AudioContext をセッション跨ぎで再利用（Safari の AudioContext 制限対策）
 const IOS_BUFFER_SIZE = 8192;
-// PC/Android: 1秒分のバッファ
-const DEFAULT_BUFFER_SIZE = 16000;
+// PC/Android: 200ms分のバッファ（リアルタイム送信優先）
+const DEFAULT_BUFFER_SIZE = 3200;
 
 const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
@@ -63,7 +63,7 @@ class AudioProcessor extends AudioWorkletProcessor {
           this.buf[this.idx++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
         if (this.idx >= ${bufferSize} ||
-            (this.idx > 0 && Date.now() - this.lastFlush > 500)) {
+            (this.idx > 0 && Date.now() - this.lastFlush > 100)) {
           this.flush();
         }
       }

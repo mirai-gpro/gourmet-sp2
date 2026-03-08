@@ -126,7 +126,7 @@ def build_live_config(system_prompt):
                 "disabled": False,
                 "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
                 "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                "prefix_padding_ms": 100,
+                "prefix_padding_ms": 500,
                 "silence_duration_ms": 500,
             }
         },
