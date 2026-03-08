@@ -69,16 +69,15 @@ export class ConciergeController extends CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // バックエンドからの初回メッセージを使用（長期記憶対応）
+      // 初期メッセージ: プレースホルダーとして即時表示（LiveAPI挨拶到着時に上書き）
       const greetingText = data.initial_message || this.t('initialGreetingConcierge');
       this.addMessage('assistant', greetingText, null, true);
+      this.isInitialGreetingPending = true;
 
-      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
-      const initialTtsPromise = data.initial_tts
-        ? this.playPreGeneratedTts(data.initial_tts)
-        : this.speakTextGCP(greetingText);
+      // LiveAPI WebSocket接続を即座に開始（挨拶はLiveAPIが本線）
+      this.initLiveConnection();
 
-      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
+      // ショップカード紹介用のTTSを事前生成（バックグラウンド）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -101,10 +100,7 @@ export class ConciergeController extends CoreController {
         } catch (_e) { }
       });
 
-      // LiveAPI WebSocket接続をTTS完了待ちせず即座に開始（応答速度改善）
-      this.initLiveConnection();
-
-      // UI有効化もTTS完了前に行う（ユーザーが即座にテキスト入力可能に）
+      // UI有効化
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
@@ -112,11 +108,8 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // TTS再生とack事前生成はバックグラウンドで完了を待つ
-      Promise.all([
-        initialTtsPromise,
-        ...ackPromises
-      ]).catch(e => console.warn('[Concierge] TTS background error:', e));
+      // ack事前生成はバックグラウンドで完了を待つ
+      Promise.all(ackPromises).catch(e => console.warn('[Concierge] TTS background error:', e));
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
