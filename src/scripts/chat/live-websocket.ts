@@ -52,7 +52,7 @@ export interface LiveCallbacks {
 }
 
 // ============================================================
-// LiveWebSocket クラス
+// LiveWebSocket クラス（自動再接続対応）
 // ============================================================
 
 export class LiveWebSocket {
@@ -61,6 +61,13 @@ export class LiveWebSocket {
   private sessionId: string;
   private cb: LiveCallbacks;
 
+  // 再接続制御
+  private reconnectAttempts = 0;
+  private readonly MAX_RECONNECT_ATTEMPTS = 5;
+  private readonly BASE_RECONNECT_DELAY = 2000; // 2秒
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private intentionalClose = false;
+
   constructor(apiHost: string, sessionId: string, callbacks: LiveCallbacks) {
     this.apiHost = apiHost;
     this.sessionId = sessionId;
@@ -68,14 +75,27 @@ export class LiveWebSocket {
   }
 
   connect() {
+    this.intentionalClose = false;
+    this.doConnect();
+  }
+
+  private doConnect() {
+    // 既存接続をクリーンアップ
+    if (this.ws) {
+      try { this.ws.close(); } catch (_) {}
+      this.ws = null;
+    }
+
     const protocol = this.apiHost.startsWith('http:') ? 'ws' : 'wss';
     const host = this.apiHost.replace(/^https?:\/\//, '');
     const url = `${protocol}://${host}/ws/live/${this.sessionId}`;
 
+    console.log(`[LiveWS] Connecting... (attempt ${this.reconnectAttempts + 1})`);
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
       console.log('[LiveWS] Connected');
+      this.reconnectAttempts = 0; // 成功したらリセット
     };
 
     this.ws.onmessage = (event) => {
@@ -97,8 +117,26 @@ export class LiveWebSocket {
       }
     };
 
-    this.ws.onclose = () => {
-      this.cb.onClose();
+    this.ws.onclose = (event) => {
+      console.log(`[LiveWS] Closed: code=${event.code}, reason=${event.reason}`);
+
+      if (this.intentionalClose) {
+        this.cb.onClose();
+        return;
+      }
+
+      // 自動再接続を試行
+      if (this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
+        const delay = this.BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts);
+        console.log(`[LiveWS] Reconnecting in ${delay}ms... (attempt ${this.reconnectAttempts + 1}/${this.MAX_RECONNECT_ATTEMPTS})`);
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectAttempts++;
+          this.doConnect();
+        }, delay);
+      } else {
+        console.error('[LiveWS] Max reconnection attempts reached, giving up');
+        this.cb.onClose();
+      }
     };
 
     this.ws.onerror = (e) => {
@@ -126,7 +164,19 @@ export class LiveWebSocket {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
+  isReconnecting(): boolean {
+    return this.reconnectTimer !== null || (
+      this.ws !== null && this.ws.readyState === WebSocket.CONNECTING
+    );
+  }
+
   disconnect() {
+    this.intentionalClose = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
     if (this.ws) {
       this.ws.close();
       this.ws = null;

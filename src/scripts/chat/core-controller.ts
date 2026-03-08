@@ -277,8 +277,11 @@ export class CoreController {
         this.resetInputState();
       },
       onClose: () => {
-        console.log('[LiveAPI] Connection closed');
+        console.log('[LiveAPI] Connection closed (reconnection exhausted)');
         this.liveReady = false;
+        // 再接続が全て失敗した場合、セッションごとリセット
+        console.log('[LiveAPI] Triggering full session reset...');
+        this.resetAppContent();
       }
     });
 
