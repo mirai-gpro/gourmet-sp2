@@ -269,14 +269,99 @@ audio-manager.ts の API 変更に伴い、core-controller.ts で必要な変更
 
 ---
 
-## 7. 実装順序
+## 7. iOS セキュリティ制約への対応（iOS 17/18 Safari）
+
+最新の iOS Safari が課すセキュリティ制約と、本仕様での対応状況。
+
+### 7.1 getUserMedia 複数呼び出しでトラックがミュートされる問題
+
+**制約**: iOS Safari では `getUserMedia()` を再度呼ぶと、前回取得したトラックの
+`muted` が `true` になり、プログラムからアンミュートできない。
+（WebKit Bug #179363 — iOS 17/18 でも未修正）
+
+**対応**: §2.4 の MediaStream シングルトン再利用で回避。
+`getUserMedia()` はセッションで1回だけ呼び、以降はトラックが `live` なら再利用する。
+オリジナルの iOS 版が既に持っていた `needNewStream` パターンを PC 版にも適用。
+
+```typescript
+// トラックが生存していれば再利用（getUserMedia を呼ばない）
+if (this.mediaStream) {
+  const tracks = this.mediaStream.getAudioTracks();
+  if (tracks.length > 0 && tracks[0].readyState === 'live' && tracks[0].enabled && !tracks[0].muted) {
+    needNewStream = false;  // 再利用
+  }
+}
+```
+
+### 7.2 AudioContext 上限4つ制限
+
+**制約**: Safari は同時に4つまでしか AudioContext を開けない。
+5つ目を作ると `UnknownError` が throw される。
+
+**対応**: §2.4 のシングルトンパターンで回避。
+セッション全体で AudioContext は1つだけ。`stopStreaming()` で close しない。
+`fullResetAudioResources()` でのみ close する。
+
+**注意**: オリジナルの PC 版 `stopVAD_Default()` 内で `audioContext.close()` していた箇所は**削除**。
+レガシー録音（`startLegacyRecording`）用の AudioContext は別インスタンスだが、
+録音終了時に close されるため共存は問題ない。
+
+### 7.3 AudioContext suspended 状態（ユーザージェスチャー必須）
+
+**制約**: iOS Safari は AudioContext をページロード時に `suspended` で作成。
+ユーザージェスチャー（click/touchstart）内で `resume()` しないと音声が出ない。
+
+**対応**:
+- `unlockAudioParams()` はオリジナルから維持（ユーザータップ時に呼ばれる）
+- §2.8 の `resumeAudioContext()` でバックグラウンド復帰時も対応
+- `enableAudioPlayback()` → `unlockAudioParams()` の既存フローを継続
+
+### 7.4 バックグラウンド→フォアグラウンド復帰時の AudioContext 停止
+
+**制約**: iOS Safari はページがバックグラウンドに行くと AudioContext を
+`interrupted` / `suspended` にする。フォアグラウンド復帰後も**自動復帰しない**。
+
+**対応**: §2.8 の `resumeAudioContext()` で処理。
+- `visibilitychange` イベントで `resume()` を試行
+- 失敗時: AudioContext を close → 再生成
+- 依存ノード（WorkletNode, sourceNode）もリセット → `ensureWorkletNode()` で再構築
+- 再生キュー（scheduledSources）もクリア
+
+### 7.5 iOS サイレントスイッチ（マナーモード）
+
+**制約**: iOS のサイレントスイッチが ON だと Web Audio API の音声が鳴らない。
+（HTMLAudioElement は鳴るケースがある）
+
+**対応**: 本仕様のスコープ外。検知方法が公式に存在しない。
+ワークアラウンドとして、無音 `<audio>` 要素でメディアチャネルを起こす手法があるが、
+実機検証が必要なため Phase 4 以降で検討。
+
+### 7.6 iOS 17.4.1+ 許可プロンプト再表示バグ
+
+**制約**: iOS 17.4.1 以降、ルート遷移やハッシュ変更時にカメラ/マイクの
+許可プロンプトが再表示されるバグが報告されている。
+
+**対応**: §2.4 の MediaStream シングルトン再利用で影響を最小化。
+`getUserMedia()` の呼び出し回数を1回に抑えることで、
+再プロンプトのトリガーを減らす。SPA 内でのルート遷移では問題なし。
+
+### 7.7 セキュアコンテキスト必須（HTTPS）
+
+**制約**: `getUserMedia()` は HTTPS でのみ利用可能。HTTP では API 自体が存在しない。
+
+**対応**: オリジナルの `getUserMediaSafe()` がエラーメッセージで HTTPS 確認を促している。
+変更なし。
+
+---
+
+## 8. 実装順序
 
 1. オリジナル `c81d62f` の audio-manager.ts をベースにコピー
 2. §2.1 トランスポート変更（socket → callback）
 3. §2.2 ハンドシェイク削除
 4. §2.3 VAD 削除（startStreaming から）
-5. §2.4 + §2.5 シングルトン統一（iOS/PC 統合）
+5. §2.4 + §2.5 シングルトン統一（iOS/PC 統合）— §7.1, §7.2 の iOS 制約対応を含む
 6. §2.6 base64 統一
 7. §2.7 AI 音声再生追加
-8. §2.8 resumeAudioContext 追加
+8. §2.8 resumeAudioContext 追加 — §7.4 のバックグラウンド復帰対応を含む
 9. core-controller.ts 側の変更
