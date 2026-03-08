@@ -162,6 +162,10 @@ class LiveSession:
       - _handle_tool_call → _handle_tool_call
     """
 
+    # セッション再接続の閾値（stt_stream.py 準拠）
+    MAX_AI_CHARS_BEFORE_RECONNECT = 800
+    LONG_SPEECH_THRESHOLD = 500
+
     def __init__(self, session_id, system_prompt, ws, language='ja', mode='chat'):
         self.session_id = session_id
         self.system_prompt = system_prompt + LIVE_API_PROMPT_SUPPLEMENT
@@ -175,6 +179,13 @@ class LiveSession:
         self.running = False
         self.thread = None
         self._ws_lock = threading.Lock()
+
+        # セッション再接続用（stt_stream.py 準拠）
+        self.ai_char_count = 0
+        self.needs_reconnect = False
+        self.session_count = 0
+        self.conversation_history = []
+        self.ai_transcript_buffer = ""
 
     def start(self):
         """バックグラウンドスレッドで LiveAPI セッションを開始"""
@@ -202,9 +213,40 @@ class LiveSession:
         finally:
             self.loop.close()
 
+    def _add_to_history(self, role, text):
+        """会話履歴に追加（stt_stream.py 準拠: 直近20ターン保持）"""
+        self.conversation_history.append({"role": role, "text": text})
+        if len(self.conversation_history) > 20:
+            self.conversation_history = self.conversation_history[-20:]
+
+    def _get_context_summary(self):
+        """会話履歴の要約を取得（stt_stream.py 準拠）"""
+        if not self.conversation_history:
+            return ""
+
+        recent = self.conversation_history[-10:]
+        summary_parts = []
+        for h in recent:
+            text = h['text'][:150]
+            summary_parts.append(f"{h['role']}: {text}")
+
+        summary = "\n".join(summary_parts)
+
+        # 最後のAI発言が質問なら強調
+        last_ai = None
+        for h in reversed(self.conversation_history):
+            if h['role'] == 'AI':
+                last_ai = h['text']
+                break
+
+        if last_ai and any(q in last_ai for q in ['?', '？', 'か?', 'か？']):
+            summary += f"\n\n【直前の質問（これに対する回答を待っています）】\n{last_ai[:200]}"
+
+        return summary
+
     async def _session_loop(self):
         """
-        Gemini LiveAPI メインセッションループ
+        Gemini LiveAPI メインセッションループ（再接続対応）
         stt_stream.py GeminiLiveApp.run → _session_loop 準拠
         """
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -212,36 +254,75 @@ class LiveSession:
             raise RuntimeError("GEMINI_API_KEY が設定されていません")
 
         client = genai.Client(api_key=api_key)
-        config = build_live_config(self.system_prompt)
 
-        logger.info(f"[LiveSession] Connecting: model={LIVE_API_MODEL}, session={self.session_id}")
+        while self.running:
+            self.session_count += 1
+            self.ai_char_count = 0
+            self.needs_reconnect = False
 
-        async with client.aio.live.connect(
-            model=LIVE_API_MODEL,
-            config=config
-        ) as session:
-            self.gemini_session = session
-            self.audio_queue = asyncio.Queue(maxsize=5)
+            # 再接続時はコンテキストを引き継ぐ
+            context = None
+            if self.session_count > 1:
+                context = self._get_context_summary()
+                logger.info(f"[LiveSession] Reconnecting (#{self.session_count}): session={self.session_id}")
+                if context:
+                    logger.info(f"[LiveSession] Context: {context[:80]}...")
 
-            self._ws_send(json.dumps({'type': 'live_ready'}))
-            logger.info(f"[LiveSession] Connected: session={self.session_id}")
+            config = build_live_config(self.system_prompt)
 
-            # stt_stream.py: TaskGroup で send_audio, receive, play_audio を並行実行
-            try:
-                await asyncio.gather(
-                    self._send_audio(session),
-                    self._receive(session)
+            # 再接続時はコンテキストをシステムプロンプトに追加
+            if context:
+                config["system_instruction"] = (
+                    self.system_prompt + LIVE_API_PROMPT_SUPPLEMENT +
+                    f"\n\n## 【会話の継続】\n以下は直前の会話履歴です。自然に会話を続けてください。\n{context}"
                 )
+
+            logger.info(f"[LiveSession] Connecting (#{self.session_count}): model={LIVE_API_MODEL}, session={self.session_id}")
+
+            try:
+                async with client.aio.live.connect(
+                    model=LIVE_API_MODEL,
+                    config=config
+                ) as session:
+                    self.gemini_session = session
+                    self.audio_queue = asyncio.Queue(maxsize=5)
+
+                    if self.session_count == 1:
+                        self._ws_send(json.dumps({'type': 'live_ready'}))
+                    logger.info(f"[LiveSession] Connected (#{self.session_count}): session={self.session_id}")
+
+                    try:
+                        await asyncio.gather(
+                            self._send_audio(session),
+                            self._receive(session)
+                        )
+                    except Exception as e:
+                        if self.running:
+                            logger.error(f"[LiveSession] Loop error: {e}")
+
+                    # needs_reconnect が True なら再接続
+                    if not self.needs_reconnect:
+                        break
+
             except Exception as e:
-                if self.running:
-                    logger.error(f"[LiveSession] Loop error: {e}")
+                error_msg = str(e).lower()
+                logger.error(f"[LiveSession] Session error (#{self.session_count}): {e}")
+
+                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed", "websocket"]):
+                    logger.info("[LiveSession] Reconnectable error. Retrying in 3s...")
+                    self.needs_reconnect = True
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
+                    break
 
     async def _send_audio(self, session):
         """
         キューから音声を取得して Gemini に送信
         stt_stream.py send_audio 準拠: session.send_realtime_input(audio=msg)
         """
-        while self.running:
+        while self.running and not self.needs_reconnect:
             try:
                 msg = await asyncio.wait_for(self.audio_queue.get(), timeout=0.1)
                 if msg is None:
@@ -256,10 +337,10 @@ class LiveSession:
     async def _receive(self, session):
         """
         Gemini からの応答を受信してブラウザにリレー
-        stt_stream.py receive_audio 準拠
+        stt_stream.py receive_audio 準拠（累積文字数管理付き）
         """
         try:
-            while self.running:
+            while self.running and not self.needs_reconnect:
                 turn = session.receive()
                 async for response in turn:
                     if not self.running:
@@ -277,7 +358,30 @@ class LiveSession:
 
                     # ターン完了（stt_stream.py: turn_complete）
                     if hasattr(sc, 'turn_complete') and sc.turn_complete:
+                        # AI発話の累積文字数チェック（stt_stream.py 準拠）
+                        if self.ai_transcript_buffer:
+                            ai_text = self.ai_transcript_buffer.strip()
+                            char_count = len(ai_text)
+                            self.ai_char_count += char_count
+                            remaining = self.MAX_AI_CHARS_BEFORE_RECONNECT - self.ai_char_count
+                            logger.info(f"[LiveSession] AI turn: {char_count}chars (total: {self.ai_char_count}, remaining: {remaining})")
+
+                            self._add_to_history('AI', ai_text)
+                            self.ai_transcript_buffer = ""
+
+                            # 長い発話 → 次で途切れるリスクが高い
+                            if char_count >= self.LONG_SPEECH_THRESHOLD:
+                                logger.info(f"[LiveSession] Long speech ({char_count} chars). Reconnecting.")
+                                self.needs_reconnect = True
+                            # 累積上限に近づいた
+                            elif self.ai_char_count >= self.MAX_AI_CHARS_BEFORE_RECONNECT:
+                                logger.info(f"[LiveSession] Char limit reached ({self.ai_char_count}). Reconnecting.")
+                                self.needs_reconnect = True
+
                         self._ws_send(json.dumps({'type': 'turn_complete'}))
+
+                        if self.needs_reconnect:
+                            return  # ループを抜けて再接続
 
                     # 割り込み検知（stt_stream.py: interrupted）
                     if hasattr(sc, 'interrupted') and sc.interrupted:
@@ -288,6 +392,7 @@ class LiveSession:
                     if hasattr(sc, 'input_transcription') and sc.input_transcription:
                         text = sc.input_transcription.text
                         if text:
+                            self._add_to_history('User', text)
                             self._ws_send(json.dumps({
                                 'type': 'input_transcription',
                                 'data': text
@@ -297,6 +402,7 @@ class LiveSession:
                     if hasattr(sc, 'output_transcription') and sc.output_transcription:
                         text = sc.output_transcription.text
                         if text:
+                            self.ai_transcript_buffer += text
                             self._ws_send(json.dumps({
                                 'type': 'text',
                                 'data': text
@@ -317,8 +423,13 @@ class LiveSession:
 
         except Exception as e:
             if self.running:
+                error_msg = str(e).lower()
                 logger.error(f"[LiveSession] Receive error: {e}")
-                self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
+                # 切断エラーは再接続で対応
+                if any(kw in error_msg for kw in ["1011", "internal error", "disconnected", "closed"]):
+                    self.needs_reconnect = True
+                else:
+                    self._ws_send(json.dumps({'type': 'error', 'data': str(e)}))
 
     async def _handle_tool_call(self, session, tool_call):
         """
