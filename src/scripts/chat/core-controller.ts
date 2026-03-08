@@ -88,6 +88,12 @@ export class CoreController {
 
     this.bindEvents();
 
+    // スプラッシュ画面タップで音声再生を解除
+    if (this.els.splashOverlay) {
+      this.els.splashOverlay.addEventListener('click', () => this.enableAudioPlayback(), { once: true });
+      this.els.splashOverlay.addEventListener('touchstart', () => this.enableAudioPlayback(), { once: true });
+    }
+
     setTimeout(() => {
         if (this.els.splashVideo) this.els.splashVideo.loop = false;
         if (this.els.splashOverlay) {
@@ -195,6 +201,7 @@ export class CoreController {
 
     const floatingButtons = this.container.querySelector('.floating-buttons');
     this.els.userInput?.addEventListener('focus', () => {
+      this.enableAudioPlayback();  // テキスト入力フォーカスでも音声再生を解除
       setTimeout(() => { if (floatingButtons) floatingButtons.classList.add('keyboard-active'); }, 300);
     });
     this.els.userInput?.addEventListener('blur', () => {
@@ -417,6 +424,16 @@ export class CoreController {
   protected handleLiveText(text: string) {
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
     if (!this.suppressNextLiveAudio) {
+      // JSON応答が混入した場合はmessageフィールドのみ抽出
+      if (text.trim().startsWith('{') && text.includes('"message"')) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.message) {
+            this.pendingResponseText += parsed.message;
+            return;
+          }
+        } catch (_) { /* JSONパース失敗: そのまま蓄積 */ }
+      }
       this.pendingResponseText += text;
     }
   }
@@ -740,7 +757,7 @@ export class CoreController {
   // ========================================
 
   protected async sendMessage() {
-    this.unlockAudioParams();
+    this.enableAudioPlayback();
     const message = this.els.userInput.value.trim();
     if (!message || this.isProcessing) return;
 
