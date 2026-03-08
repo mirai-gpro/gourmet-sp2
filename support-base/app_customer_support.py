@@ -22,6 +22,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+from flask_sock import Sock
 from google import genai
 from google.genai import types
 from google.cloud import texttospeech
@@ -40,6 +41,7 @@ from support_core import (
     SupportSession,
     SupportAssistant
 )
+from live_session import LiveSessionManager
 
 # ロギング設定
 logging.basicConfig(
@@ -67,6 +69,10 @@ else:
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False  # UTF-8エンコーディングを有効化
+sock = Sock(app)
+
+# LiveAPI セッション管理
+live_session_manager = LiveSessionManager()
 
 # ========================================
 # CORS & SocketIO 設定 (Claudeアドバイス適用版)
@@ -217,6 +223,37 @@ def start_session():
                     'name_honorific': profile.get('name_honorific')
                 }
                 logger.info(f"[API] user_profile を返却: {response_data['user_profile']}")
+
+        # 初期メッセージの TTS を事前生成して返す（フロント側の TTS 呼び出し不要に）
+        try:
+            clean_text = initial_message.replace('**', '').replace('\n\n', '。').replace('\n', '。')
+            if len(clean_text) > 200:
+                clean_text = clean_text[:200]
+
+            voice_map = {
+                'ja': ('ja-JP', 'ja-JP-Chirp3-HD-Leda'),
+                'en': ('en-US', 'en-US-Studio-O'),
+                'zh': ('cmn-CN', 'cmn-CN-Wavenet-A'),
+                'ko': ('ko-KR', 'ko-KR-Wavenet-A')
+            }
+            lang_code, voice_name = voice_map.get(language, voice_map['ja'])
+
+            synthesis_input = texttospeech.SynthesisInput(text=clean_text)
+            voice = texttospeech.VoiceSelectionParams(
+                language_code=lang_code, name=voice_name
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3
+            )
+            tts_response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+            response_data['initial_tts'] = base64.b64encode(
+                tts_response.audio_content
+            ).decode('utf-8')
+            logger.info(f"[API] 初期メッセージTTS生成完了: {len(clean_text)}文字")
+        except Exception as tts_err:
+            logger.warning(f"[API] 初期メッセージTTS生成失敗: {tts_err}")
 
         return jsonify(response_data)
 
@@ -724,11 +761,17 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
+        'build_version': '5904ae5-live',
+        'live_api_model': 'gemini-2.5-flash-native-audio-preview-12-2025',
+        'websocket_endpoint': '/ws/live/<session_id>',
+        'active_live_sessions': len(live_session_manager.sessions),
         'services': {
             'gemini': 'ok',
             'ram_session': 'ok',
             'tts': 'ok',
             'stt': 'ok',
+            'live_api': 'ok',
+            'flask_sock': 'ok',
             'places_api': 'ok' if GOOGLE_PLACES_API_KEY else 'not configured',
             'audio2exp': 'ok' if AUDIO2EXP_SERVICE_URL else 'not configured'
         }
@@ -879,6 +922,72 @@ def handle_stop_stream():
         del active_streams[request.sid]
 
     emit('stream_stopped', {'status': 'stopped'})
+
+
+# ========================================
+# LiveAPI WebSocket エンドポイント
+# ========================================
+@sock.route('/ws/live/<session_id>')
+def live_websocket(ws, session_id):
+    """
+    LiveAPI WebSocket エンドポイント
+    ブラウザ WebSocket ↔ バックエンド ↔ Gemini LiveAPI WebSocket
+    """
+    logger.info(f"[LiveAPI WS] ★ WebSocket接続受信: session={session_id}, remote={request.remote_addr}")
+
+    # セッション情報を取得
+    session = SupportSession(session_id)
+    session_data = session.get_data()
+
+    if not session_data:
+        ws.send(json.dumps({'type': 'error', 'data': 'セッションが見つかりません'}))
+        return
+
+    language = session_data.get('language', 'ja')
+    mode = session_data.get('mode', 'chat')
+
+    # システムプロンプトを取得（既存ロジック維持）
+    mode_prompts = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS.get('chat', {}))
+    system_prompt = mode_prompts.get(language, mode_prompts.get('ja', ''))
+
+    # LiveAPIセッション作成・開始
+    live_session = live_session_manager.create(
+        session_id, system_prompt, ws, language, mode
+    )
+
+    try:
+        # ブラウザからのメッセージを受信してリレー
+        while True:
+            data = ws.receive(timeout=300)
+            if data is None:
+                break
+
+            try:
+                msg = json.loads(data)
+                msg_type = msg.get('type')
+
+                if msg_type == 'audio_chunk':
+                    live_session.send_audio(msg.get('data', ''))
+
+                elif msg_type == 'text_input':
+                    text = msg.get('data', '')
+                    if text:
+                        # テキスト入力を履歴に追加
+                        session.add_message('user', text, 'chat')
+                        live_session.send_text(text)
+
+                elif msg_type == 'cancel':
+                    logger.info(f"[LiveAPI WS] キャンセル: session={session_id}")
+                    break
+
+            except json.JSONDecodeError:
+                logger.warning(f"[LiveAPI WS] 不正なメッセージ: {data[:100]}")
+
+    except Exception as e:
+        logger.error(f"[LiveAPI WS] エラー: {e}")
+    finally:
+        live_session_manager.remove(session_id)
+        logger.info(f"[LiveAPI WS] 切断: session={session_id}")
 
 
 if __name__ == '__main__':
