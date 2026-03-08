@@ -321,16 +321,11 @@ export class CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // 初期メッセージ: サーバーから返されたものを優先（コンシェルジュモードの個別挨拶対応）
+      // 初期メッセージ: サーバーから返されたものを画面表示（音声はLiveAPIが喋る）
       const initialMsg = data.initial_message || this.t('initialGreeting');
       this.addMessage('assistant', initialMsg, null, true);
 
-      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
-      const initialTtsPromise = data.initial_tts
-        ? this.playPreGeneratedTts(data.initial_tts)
-        : this.speakTextGCP(initialMsg);
-
-      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
+      // ショップカード紹介用のTTSを事前生成（LiveAPI接続と並行）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -353,10 +348,8 @@ export class CoreController {
         } catch (_e) { }
       });
 
-      await Promise.all([
-        initialTtsPromise,
-        ...ackPromises
-      ]);
+      // ack事前生成はバックグラウンドで実行（ブロックしない）
+      Promise.all(ackPromises).catch(() => {});
 
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
