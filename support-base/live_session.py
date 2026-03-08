@@ -311,6 +311,17 @@ class LiveSession:
 
                     if self.session_count == 1:
                         self._ws_send(json.dumps({'type': 'live_ready'}))
+                        # 初回接続: モデルに挨拶を促すトリガーを送信
+                        # LiveAPIは入力がないと自発的に喋らないため、
+                        # システムメッセージでモデルのターンを開始させる
+                        await session.send_client_content(
+                            turns=types.Content(
+                                role="user",
+                                parts=[types.Part(text="[セッション開始] ユーザーが接続しました。初期挨拶をしてください。")]
+                            ),
+                            turn_complete=True
+                        )
+                        logger.info(f"[LiveSession] Sent greeting trigger: session={self.session_id}")
                     logger.info(f"[LiveSession] Connected (#{self.session_count}): session={self.session_id}")
 
                     try:
