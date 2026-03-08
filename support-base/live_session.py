@@ -153,7 +153,6 @@ def build_live_config(system_prompt):
         "input_audio_transcription": {},
         "output_audio_transcription": {},
         "speech_config": {
-            "language_code": "ja-JP",
             "voice_config": {
                 "prebuilt_voice_config": {
                     "voice_name": "Aoede"
