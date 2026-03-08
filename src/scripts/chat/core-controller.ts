@@ -33,6 +33,10 @@ export class CoreController {
   protected pendingAudioChunks: string[] = [];
   protected liveReady = false;
 
+  // ユーザー発話トランスクリプション蓄積用
+  protected pendingUserTranscript = '';
+  protected pendingUserMsgEl: HTMLElement | null = null;
+
   // バックグラウンド状態の追跡
   protected isInBackground = false;
   protected backgroundStartTime = 0;
@@ -153,6 +157,8 @@ export class CoreController {
     this.pendingAudioChunks = [];
     this.liveReady = false;
     this.suppressNextLiveAudio = false;
+    this.pendingUserTranscript = '';
+    this.pendingUserMsgEl = null;
 
     await new Promise(resolve => setTimeout(resolve, 300));
     await this.initializeSession();
@@ -365,6 +371,8 @@ export class CoreController {
   // ========================================
 
   protected handleLiveSearching() {
+    // ユーザー発話を確定
+    this.finalizeUserTranscript();
     // 即座にウエイティングアニメーション表示
     this.showWaitOverlay();
 
@@ -394,11 +402,31 @@ export class CoreController {
   }
 
   protected handleLiveInputTranscription(text: string) {
-    // input_audio_transcription からのテキスト（ユーザー発話のテキスト版）
-    this.addMessage('user', text);
+    // input_audio_transcription フラグメントを蓄積して1つのバブルに表示
+    this.pendingUserTranscript += text;
+
+    if (this.pendingUserMsgEl) {
+      // 既存バブルを更新
+      const span = this.pendingUserMsgEl.querySelector('.message-text');
+      if (span) span.textContent = this.pendingUserTranscript;
+    } else {
+      // 新しいバブルを作成
+      this.pendingUserMsgEl = this.addMessageElement('user', this.pendingUserTranscript);
+    }
+    this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
+  }
+
+  // ユーザー発話トランスクリプションを確定
+  protected finalizeUserTranscript() {
+    if (this.pendingUserTranscript) {
+      this.pendingUserTranscript = '';
+      this.pendingUserMsgEl = null;
+    }
   }
 
   protected handleLiveAudio(base64: string) {
+    // AI音声受信 = ユーザー発話確定
+    this.finalizeUserTranscript();
     // ショップ表示後のLiveAPI音声は抑制（Cloud TTSで代替済み）
     if (this.suppressNextLiveAudio) return;
     this.pendingAudioChunks.push(base64);
@@ -416,6 +444,7 @@ export class CoreController {
 
   protected handleLiveTurnComplete() {
     this.hideWaitOverlay();
+    this.finalizeUserTranscript();
 
     // ショップ表示後のLiveAPI音声ターンは完全スキップ
     if (this.suppressNextLiveAudio) {
@@ -460,6 +489,7 @@ export class CoreController {
 
   protected handleLiveShops(data: { response: string; shops: any[]; ttsAudio?: string }) {
     this.hideWaitOverlay();
+    this.finalizeUserTranscript();
 
     const { response, shops, ttsAudio } = data;
 
@@ -994,6 +1024,10 @@ export class CoreController {
   }
 
   protected addMessage(role: string, text: string, summary: string | null = null, isInitial: boolean = false) {
+    this.addMessageElement(role, text, isInitial);
+  }
+
+  protected addMessageElement(role: string, text: string, isInitial: boolean = false): HTMLElement {
     const div = document.createElement('div');
     div.className = `message ${role}`;
     if (isInitial) div.setAttribute('data-initial', 'true');
@@ -1002,6 +1036,7 @@ export class CoreController {
     div.innerHTML = `<div class="message-avatar">${role === 'assistant' ? '🍽' : '👤'}</div>${contentHtml}`;
     this.els.chatArea.appendChild(div);
     this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
+    return div;
   }
 
   protected resetInputState() {
