@@ -411,7 +411,7 @@ export class CoreController {
         this.els.voiceStatus.className = 'voice-status stopped';
         this.isAISpeaking = false;
       };
-      this.ttsPlayer.play().catch((e) => { console.error('[TTS] Ack play error:', e); this.isAISpeaking = false; });
+      this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
     }
 
     // 5秒後に「只今お店の情報を確認中です。もう少々お待ちください」を再生
@@ -432,7 +432,7 @@ export class CoreController {
             this.els.voiceStatus.className = 'voice-status stopped';
             this.isAISpeaking = false;
           };
-          this.ttsPlayer.play().catch((e) => { console.error('[TTS] Wait play error:', e); this.isAISpeaking = false; });
+          this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
         } else if (this.isTTSEnabled && this.isUserInteracted) {
           // 事前生成がない場合はリアルタイムTTS
           this.speakTextGCP(waitMsg, true);
@@ -581,7 +581,7 @@ export class CoreController {
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
         };
-        this.ttsPlayer.play().catch((e) => { console.error('[TTS] Shop play error:', e); this.isAISpeaking = false; });
+        this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
       } else if (!ttsAudio && response && this.isTTSEnabled && this.isUserInteracted) {
         // ttsAudio が空の場合はフォールバック: リアルタイムCloud TTSで読み上げ
         console.log('[LiveAPI] ttsAudio empty, falling back to speakTextGCP');
@@ -640,8 +640,7 @@ export class CoreController {
         this.isAISpeaking = false;
         resolve();
       };
-      this.ttsPlayer.play().catch((e) => {
-        console.error('[TTS] LiveAudio play error:', e);
+      this.ttsPlayer.play().catch(() => {
         URL.revokeObjectURL(url);
         this.isAISpeaking = false;
         resolve();
@@ -877,13 +876,11 @@ export class CoreController {
         this.isAISpeaking = false;
         resolve();
       };
-      this.ttsPlayer.onerror = (e) => {
-        console.error('[TTS] PreGenerated audio error:', e);
+      this.ttsPlayer.onerror = () => {
         this.isAISpeaking = false;
         resolve();
       };
-      this.ttsPlayer.play().catch((e) => {
-        console.error('[TTS] PreGenerated play error:', e);
+      this.ttsPlayer.play().catch(() => {
         this.isAISpeaking = false;
         resolve();
       });
@@ -956,8 +953,7 @@ export class CoreController {
       } else {
         this.isAISpeaking = false;
       }
-    } catch (error) {
-      console.error('[TTS] speakTextGCP error:', error);
+    } catch (_error) {
       this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
       this.els.voiceStatus.className = 'voice-status stopped';
       this.isAISpeaking = false;
@@ -986,16 +982,14 @@ export class CoreController {
       this.isUserInteracted = true;
       const clickPrompt = this.container.querySelector('.click-prompt');
       if (clickPrompt) clickPrompt.remove();
+      this.unlockAudioParams();
 
-      // 初期挨拶TTSが保留されていたら即再生（play()自体がブラウザのaudio unlock）
+      // 初期挨拶TTSが保留されていたら再生
       if (this.pendingInitialTts) {
         const ttsData = this.pendingInitialTts;
         this.pendingInitialTts = null;
         console.log('[TTS] Playing deferred initial TTS');
         this.playPreGeneratedTts(ttsData);
-      } else {
-        // 保留TTSがない場合のみunlock（レースコンディション回避）
-        this.unlockAudioParams();
       }
     }
   }
