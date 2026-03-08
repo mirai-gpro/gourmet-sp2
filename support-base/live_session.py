@@ -121,6 +121,7 @@ def build_live_config(system_prompt):
     stt_stream.py との差異:
       - voice_name: "Aoede" を追加（グルメアプリ用の声）
       - tools: search_restaurants を追加
+      - automatic_activity_detection: disabled（LLMベースVADでターン検知）
     """
     return {
         "response_modalities": ["AUDIO"],
@@ -137,11 +138,7 @@ def build_live_config(system_prompt):
         },
         "realtime_input_config": {
             "automatic_activity_detection": {
-                "disabled": False,
-                "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
-                "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                "prefix_padding_ms": 500,
-                "silence_duration_ms": 500,
+                "disabled": True,
             }
         },
         "context_window_compression": {
