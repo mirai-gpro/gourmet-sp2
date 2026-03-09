@@ -1,29 +1,24 @@
 // src/scripts/chat/audio-manager.ts
 //
-// マイク音声キャプチャ（LiveAPI 専用）
+// マイク音声キャプチャ + AI 音声再生（LiveAPI 専用）
 //
-// 設計方針:
-//   - クライアント側 VAD は使用しない
-//   - ターン検知は Gemini の automatic_activity_detection に委任
-//   - AudioWorklet で Float32 → Int16 PCM (16kHz mono) に変換
-//   - base64 エンコードしてコールバック経由で送信
-//
-// 参考: audio-streaming-code-review.md
-//   - stopAll: onended = null してから stop()（配列 mutation 防止）
-//   - resumeAudioContext: 依存ノード全リセット
-//   - iOS: AudioContext 再利用（Safari 制約）
+// 設計方針（audio-manager-liveapi-change-spec.md 準拠）:
+//   §2.4 AudioContext / MediaStream / WorkletNode をシングルトン再利用（iOS/PC 統合）
+//   §2.7 AI 音声再生: playPcmAudio（キュー方式ギャップレス）/ playMp3Audio（単発）
+//   §2.8 resumeAudioContext: iOS バックグラウンド復帰対応
+//   §7.1 getUserMedia は1回のみ（iOS トラックミュート問題回避）
+//   §7.2 AudioContext は1つのみ（Safari 上限4つ制限回避）
 
 const TARGET_SAMPLE_RATE = 16000;
 const MAX_RECORDING_TIME = 60000;
 
-// iOS: AudioContext をセッション跨ぎで再利用（Safari の AudioContext 制限対策）
 const IOS_BUFFER_SIZE = 8192;
-// PC/Android: 200ms分のバッファ（リアルタイム送信優先）
 const DEFAULT_BUFFER_SIZE = 3200;
 
 const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 // --- base64 エンコード（高速版）---
+// §2.6: b === undefined チェック修正済み（Number.isNaN では undefined を検知できない）
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
@@ -85,11 +80,25 @@ registerProcessor('${processorName}', AudioProcessor);
 
 
 export class AudioManager {
-  // AudioContext（iOS: セッション跨ぎで再利用、PC: 毎回生成）
+  // §2.4 シングルトンリソース（iOS/PC 共通）
   private audioCtx: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
   private mediaStream: MediaStream | null = null;
+  private isModuleRegistered = false;
+  private workletProcName = '';
+
+  // §2.4 canSendAudio フラグ方式
+  private canSendAudio = false;
+  private onAudioChunkCallback: ((base64: string) => void) | null = null;
   private recordingTimer: number | null = null;
+
+  // §2.7 AI 音声再生
+  private scheduledSources: AudioBufferSourceNode[] = [];
+  private nextPlayTime = 0;
+  private _isPlaying = false;
+  private playbackGeneration = 0;
+  private readonly MAX_SCHEDULE_AHEAD = 0.5; // 秒
 
   // レガシー録音用（REST API フォールバック）
   private mediaRecorder: MediaRecorder | null = null;
@@ -114,8 +123,8 @@ export class AudioManager {
   // ============================================================
   // LiveAPI ストリーミング（メイン機能）
   //
-  // クライアント側 VAD なし。Gemini の automatic_activity_detection に委任。
-  // stopStreaming() が呼ばれるまで連続送信。
+  // §2.4 シングルトン: AudioContext / MediaStream / WorkletNode を再利用
+  // §2.3 クライアント VAD なし。Gemini の automatic_activity_detection に委任。
   // ============================================================
 
   async startStreaming(
@@ -123,58 +132,24 @@ export class AudioManager {
     onStopCallback: () => void,
     _onSpeechStart?: () => void
   ) {
-    this.cleanup();
+    // 既に送信中なら何もしない
+    if (this.canSendAudio) return;
 
-    // AudioContext 取得（iOS: 再利用、PC: 新規）
-    // @ts-ignore
-    const ACClass = window.AudioContext || window.webkitAudioContext;
-    if (IS_IOS) {
-      if (!this.audioCtx || this.audioCtx.state === 'closed') {
-        this.audioCtx = new ACClass({ latencyHint: 'interactive', sampleRate: 48000 });
-      }
-    } else {
-      if (this.audioCtx && this.audioCtx.state !== 'closed') {
-        this.audioCtx.close();
-      }
-      this.audioCtx = new ACClass({ latencyHint: 'interactive', sampleRate: 48000 });
-    }
+    this.onAudioChunkCallback = onAudioChunk;
 
-    if (this.audioCtx.state === 'suspended') {
-      await this.audioCtx.resume();
-    }
+    // --- AudioContext 確保（シングルトン）---
+    await this.ensureAudioContext();
 
-    // マイク取得
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
+    // --- MediaStream 確保（§7.1 再利用で getUserMedia 呼び出し最小化）---
+    await this.ensureMediaStream();
 
-    const nativeRate = this.audioCtx.sampleRate;
-    const ratio = nativeRate / TARGET_SAMPLE_RATE;
-    const bufSize = IS_IOS ? IOS_BUFFER_SIZE : DEFAULT_BUFFER_SIZE;
-    const procName = IS_IOS ? `audio-proc-ios-${Date.now()}` : 'audio-proc';
+    // --- AudioWorklet 確保（addModule は1回のみ）---
+    await this.ensureWorkletNode();
 
-    // AudioWorklet 登録
-    const code = buildWorkletCode(procName, bufSize, ratio);
-    const blob = new Blob([code], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    await this.audioCtx.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
+    // 送信開始
+    this.canSendAudio = true;
 
-    // 音声グラフ構築
-    const source = this.audioCtx.createMediaStreamSource(this.mediaStream);
-    this.workletNode = new AudioWorkletNode(this.audioCtx, procName);
-
-    this.workletNode.port.onmessage = (ev) => {
-      const { audioChunk } = ev.data;
-      if (audioChunk) {
-        try { onAudioChunk(arrayBufferToBase64(audioChunk.buffer)); } catch {}
-      }
-    };
-
-    source.connect(this.workletNode);
-    this.workletNode.connect(this.audioCtx.destination);
-
-    // MAX_RECORDING_TIME 安全弁のみ
+    // MAX_RECORDING_TIME 安全弁
     this.recordingTimer = window.setTimeout(() => {
       this.stopStreaming();
       onStopCallback();
@@ -182,15 +157,143 @@ export class AudioManager {
   }
 
   stopStreaming() {
-    if (this.recordingTimer) { clearTimeout(this.recordingTimer); this.recordingTimer = null; }
-    this.disconnectWorklet();
-    this.releaseMediaStream();
-
-    // PC: AudioContext を閉じる（iOS: 再利用のため残す）
-    if (!IS_IOS && this.audioCtx && this.audioCtx.state !== 'closed') {
-      this.audioCtx.close();
-      this.audioCtx = null;
+    // §2.4: canSendAudio = false のみ。ノード破棄しない。
+    this.canSendAudio = false;
+    this.onAudioChunkCallback = null;
+    if (this.recordingTimer) {
+      clearTimeout(this.recordingTimer);
+      this.recordingTimer = null;
     }
+  }
+
+  // ============================================================
+  // §2.7 AI 音声再生
+  // ============================================================
+
+  /** キュー方式ギャップレス再生（LiveAPI PCM チャンク用） */
+  async playPcmAudio(base64Data: string, sampleRate: number = 24000): Promise<void> {
+    const gen = this.playbackGeneration;
+    await this.ensureAudioContext();
+    if (gen !== this.playbackGeneration) return; // stopAll が呼ばれた
+
+    const ctx = this.audioCtx!;
+
+    // base64 → Int16 → Float32 → AudioBuffer
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
+    }
+
+    const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
+    audioBuffer.getChannelData(0).set(float32);
+
+    // 先読み制限: スケジュールが先行しすぎたら待機
+    const now = ctx.currentTime;
+    if (this.nextPlayTime > now + this.MAX_SCHEDULE_AHEAD) {
+      const waitMs = (this.nextPlayTime - now - this.MAX_SCHEDULE_AHEAD) * 1000;
+      await new Promise(r => setTimeout(r, waitMs));
+      if (gen !== this.playbackGeneration) return;
+    }
+
+    // スケジューリング
+    const startTime = Math.max(ctx.currentTime, this.nextPlayTime);
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+
+    source.onended = () => {
+      source.disconnect();
+      const idx = this.scheduledSources.indexOf(source);
+      if (idx >= 0) this.scheduledSources.splice(idx, 1);
+      if (this.scheduledSources.length === 0) {
+        this._isPlaying = false;
+      }
+    };
+
+    this.scheduledSources.push(source);
+    source.start(startTime);
+    this.nextPlayTime = startTime + audioBuffer.duration;
+    this._isPlaying = true;
+  }
+
+  /** 単発再生（ack 音声、GCP TTS 等の MP3） */
+  async playMp3Audio(base64Data: string): Promise<void> {
+    this.stopAll();
+    await this.ensureAudioContext();
+
+    const ctx = this.audioCtx!;
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+
+    return new Promise<void>((resolve) => {
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+
+      const gen = this.playbackGeneration;
+      source.onended = () => {
+        source.disconnect();
+        const idx = this.scheduledSources.indexOf(source);
+        if (idx >= 0) this.scheduledSources.splice(idx, 1);
+        if (gen === this.playbackGeneration) {
+          this._isPlaying = false;
+        }
+        resolve();
+      };
+
+      this.scheduledSources.push(source);
+      source.start();
+      this._isPlaying = true;
+    });
+  }
+
+  /** 全再生停止 */
+  stopAll() {
+    this.playbackGeneration++;
+    for (const src of this.scheduledSources) {
+      src.onended = null;
+      try { src.stop(); } catch {}
+      try { src.disconnect(); } catch {}
+    }
+    this.scheduledSources = [];
+    this.nextPlayTime = 0;
+    this._isPlaying = false;
+  }
+
+  get isPlaying(): boolean {
+    return this._isPlaying;
+  }
+
+  // ============================================================
+  // §2.8 resumeAudioContext（iOS バックグラウンド復帰対応）
+  // ============================================================
+
+  async resumeAudioContext(): Promise<void> {
+    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
+
+    try {
+      await this.audioCtx.resume();
+      if (this.audioCtx.state === 'running') return;
+    } catch {}
+
+    // resume 失敗 → AudioContext を再生成
+    console.log('[AudioManager] resumeAudioContext: recreating AudioContext');
+    try { this.audioCtx.close(); } catch {}
+    this.audioCtx = null;
+    this.workletNode = null;
+    this.sourceNode = null;
+    this.isModuleRegistered = false;
+
+    // 再生キューもクリア
+    this.nextPlayTime = 0;
+    this.scheduledSources = [];
   }
 
   // ============================================================
@@ -205,16 +308,17 @@ export class AudioManager {
   ) {
     if (this.recordingTimer) { clearTimeout(this.recordingTimer); this.recordingTimer = null; }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await this.getUserMediaSafe({
       audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
     });
-    this.mediaStream = stream;
+    // レガシー録音は独立した MediaStream を使う（シングルトンとは別）
+    const legacyStream = stream;
 
     // @ts-ignore
     const ACClass = window.AudioContext || window.webkitAudioContext;
-    this.audioCtx = new ACClass();
-    const source = this.audioCtx.createMediaStreamSource(stream);
-    this.analyser = this.audioCtx.createAnalyser();
+    const legacyCtx = new ACClass();
+    const source = legacyCtx.createMediaStreamSource(legacyStream);
+    this.analyser = legacyCtx.createAnalyser();
     this.analyser.fftSize = 512;
     source.connect(this.analyser);
 
@@ -247,7 +351,7 @@ export class AudioManager {
 
     // MediaRecorder
     // @ts-ignore
-    this.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+    this.mediaRecorder = new MediaRecorder(legacyStream, { mimeType: 'audio/webm;codecs=opus' });
     this.audioChunks = [];
 
     this.mediaRecorder.ondataavailable = (ev: any) => {
@@ -255,8 +359,8 @@ export class AudioManager {
     };
 
     this.mediaRecorder.onstop = () => {
-      this.stopVAD();
-      stream.getTracks().forEach(t => t.stop());
+      this.stopVAD(legacyCtx);
+      legacyStream.getTracks().forEach(t => t.stop());
       if (this.recordingTimer) { clearTimeout(this.recordingTimer); this.recordingTimer = null; }
       if (this.audioChunks.length > 0) {
         onStopCallback(new Blob(this.audioChunks, { type: 'audio/webm' }));
@@ -283,58 +387,148 @@ export class AudioManager {
     }
   }
 
-  /** 全リソース解放（audio-streaming-code-review.md: resumeAudioContext 全リセット準拠） */
+  /** 全リソース解放（セッション終了用） */
   fullResetAudioResources() {
     this.stopStreaming();
+    this.stopAll();
+
     if (this.mediaRecorder?.state !== 'inactive') {
       try { this.mediaRecorder?.stop(); } catch {}
     }
     this.mediaRecorder = null;
-    // iOS の再利用 AudioContext も含めて完全リセット
-    if (this.audioCtx && this.audioCtx.state !== 'closed') {
-      this.audioCtx.close();
-    }
-    this.audioCtx = null;
-    this.workletNode = null;
-    this.releaseMediaStream();
-  }
 
-  // stub（core-controller から参照される）
-  async playTTS(_audioBase64: string): Promise<void> {}
-  stopTTS() {}
-
-  // --- private ---
-
-  private cleanup() {
-    if (this.recordingTimer) { clearTimeout(this.recordingTimer); this.recordingTimer = null; }
-    this.disconnectWorklet();
-  }
-
-  /** audio-streaming-code-review.md: onended = null → disconnect 順序 */
-  private disconnectWorklet() {
+    // WorkletNode
     if (this.workletNode) {
       this.workletNode.port.onmessage = null;
       try { this.workletNode.disconnect(); } catch {}
       this.workletNode = null;
     }
-  }
+    if (this.sourceNode) {
+      try { this.sourceNode.disconnect(); } catch {}
+      this.sourceNode = null;
+    }
 
-  private releaseMediaStream() {
+    // MediaStream
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach(t => t.stop());
       this.mediaStream = null;
     }
+
+    // AudioContext
+    if (this.audioCtx && this.audioCtx.state !== 'closed') {
+      this.audioCtx.close();
+    }
+    this.audioCtx = null;
+    this.isModuleRegistered = false;
   }
 
-  private stopVAD() {
+  // --- private: シングルトン確保 ---
+
+  /** AudioContext をシングルトンで確保（§2.4 + §7.2） */
+  private async ensureAudioContext() {
+    // @ts-ignore
+    const ACClass = window.AudioContext || window.webkitAudioContext;
+    if (!this.audioCtx || this.audioCtx.state === 'closed') {
+      this.audioCtx = new ACClass({ latencyHint: 'interactive', sampleRate: 48000 });
+      this.isModuleRegistered = false;
+      this.workletNode = null;
+      this.sourceNode = null;
+    }
+    if (this.audioCtx.state === 'suspended') {
+      await this.audioCtx.resume();
+    }
+  }
+
+  /** MediaStream をシングルトンで確保（§2.4 + §7.1） */
+  private async ensureMediaStream() {
+    let needNewStream = true;
+    if (this.mediaStream) {
+      const tracks = this.mediaStream.getAudioTracks();
+      if (tracks.length > 0 && tracks[0].readyState === 'live' && tracks[0].enabled && !tracks[0].muted) {
+        needNewStream = false;
+      }
+    }
+    if (needNewStream) {
+      // 古いストリームを解放
+      if (this.mediaStream) {
+        this.mediaStream.getTracks().forEach(t => t.stop());
+      }
+      // sourceNode は古い stream に紐づいているのでリセット
+      if (this.sourceNode) {
+        try { this.sourceNode.disconnect(); } catch {}
+        this.sourceNode = null;
+      }
+      this.mediaStream = await this.getUserMediaSafe({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+    }
+  }
+
+  /** AudioWorkletNode をシングルトンで確保（§2.4） */
+  private async ensureWorkletNode() {
+    const ctx = this.audioCtx!;
+    const bufSize = IS_IOS ? IOS_BUFFER_SIZE : DEFAULT_BUFFER_SIZE;
+    const nativeRate = ctx.sampleRate;
+    const ratio = nativeRate / TARGET_SAMPLE_RATE;
+
+    // addModule は AudioContext ごとに1回のみ
+    if (!this.isModuleRegistered) {
+      // Safari は同名プロセッサの再登録でエラーになるためユニーク名を使用
+      this.workletProcName = IS_IOS ? `audio-proc-ios-${Date.now()}` : `audio-proc-${Date.now()}`;
+      const code = buildWorkletCode(this.workletProcName, bufSize, ratio);
+      const blob = new Blob([code], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      this.isModuleRegistered = true;
+      // addModule 後は既存の workletNode は無効
+      this.workletNode = null;
+    }
+
+    // WorkletNode が無ければ作成
+    if (!this.workletNode) {
+      this.workletNode = new AudioWorkletNode(ctx, this.workletProcName);
+      this.workletNode.port.onmessage = (ev) => {
+        if (!this.canSendAudio || !this.onAudioChunkCallback) return;
+        const { audioChunk } = ev.data;
+        if (audioChunk) {
+          try { this.onAudioChunkCallback(arrayBufferToBase64(audioChunk.buffer)); } catch {}
+        }
+      };
+    }
+
+    // sourceNode が無ければ作成して接続
+    if (!this.sourceNode && this.mediaStream) {
+      this.sourceNode = ctx.createMediaStreamSource(this.mediaStream);
+      this.sourceNode.connect(this.workletNode);
+      this.workletNode.connect(ctx.destination);
+    }
+  }
+
+  /** getUserMedia の安全なラッパー（§7.7 HTTPS チェック含む） */
+  private async getUserMediaSafe(constraints: MediaStreamConstraints): Promise<MediaStream> {
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      return navigator.mediaDevices.getUserMedia(constraints);
+    }
+    // @ts-ignore
+    const legacyGetUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+    if (legacyGetUserMedia) {
+      return new Promise((resolve, reject) => {
+        legacyGetUserMedia.call(navigator, constraints, resolve, reject);
+      });
+    }
+    throw new Error('マイク機能が見つかりません。HTTPS(鍵マーク)のURLでアクセスしているか確認してください。');
+  }
+
+  /** レガシー VAD 停止 */
+  private stopVAD(legacyCtx?: AudioContext) {
     if (this.vadInterval) { clearInterval(this.vadInterval); this.vadInterval = null; }
     if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
     this.analyser = null;
     this.silenceCount = 0;
     this.hasSpoken = false;
-    if (this.audioCtx && this.audioCtx.state !== 'closed') {
-      this.audioCtx.close();
-      this.audioCtx = null;
+    if (legacyCtx && legacyCtx.state !== 'closed') {
+      legacyCtx.close();
     }
   }
 }
