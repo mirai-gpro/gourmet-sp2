@@ -69,9 +69,8 @@ export class ConciergeController extends CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // 初期メッセージ: プレースホルダーとして即時表示（LiveAPI挨拶到着時に上書き）
-      const greetingText = data.initial_message || this.t('initialGreetingConcierge');
-      this.addMessage('assistant', greetingText, null, true);
+      // LiveAPI挨拶が本線 → プレースホルダー不要
+      // handleLiveTurnComplete で初回挨拶テキスト + 音声を表示・再生
       this.isInitialGreetingPending = true;
 
       // LiveAPI WebSocket接続を即座に開始（挨拶はLiveAPIが本線）
@@ -214,17 +213,8 @@ export class ConciergeController extends CoreController {
   // UI言語更新をオーバーライド(挨拶文をコンシェルジュ用に)
   // ========================================
   protected updateUILanguage() {
-    // バックエンドからの長期記憶対応済み挨拶を保持
-    const initialMessage = this.els.chatArea.querySelector('.message.assistant[data-initial="true"] .message-text');
-    const savedGreeting = initialMessage?.textContent;
-
     // 親クラスのupdateUILanguageを実行（UIラベル等を更新）
     super.updateUILanguage();
-
-    // 長期記憶対応済み挨拶を復元（親が上書きしたものを戻す）
-    if (initialMessage && savedGreeting) {
-      initialMessage.textContent = savedGreeting;
-    }
 
     // ページタイトルをコンシェルジュ用に設定
     const pageTitle = document.getElementById('pageTitle');
