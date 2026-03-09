@@ -36,7 +36,7 @@ export class CoreController {
   protected liveReady = false;
 
   // ユーザー発話トランスクリプション蓄積用
-  protected pendingUserTranscript = '';
+
 
   // AI応答ストリーミング表示用
   protected streamingMsgEl: HTMLElement | null = null;
@@ -384,7 +384,7 @@ export class CoreController {
 
   protected handleLiveSearching() {
     // ユーザー発話を確定
-    this.finalizeUserTranscript();
+
     // 即座にウエイティングアニメーション表示
     this.showWaitOverlay();
 
@@ -405,8 +405,6 @@ export class CoreController {
   }
 
   protected handleLiveText(text: string) {
-    // AIテキスト到着 = ユーザー発話確定（ユーザーバブルをAI回答より先に表示）
-    this.finalizeUserTranscript();
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
     if (!this.suppressNextLiveAudio) {
       this.pendingResponseText += text;
@@ -424,23 +422,13 @@ export class CoreController {
     }
   }
 
-  protected handleLiveInputTranscription(text: string) {
-    // input_audio_transcription はLLM入力ではなく参考情報のみ（チャット表示しない）
-    this.pendingUserTranscript += text;
-  }
-
-  // ユーザー発話トランスクリプションを確定
-  protected finalizeUserTranscript() {
-    if (this.pendingUserTranscript) {
-      // テキスト送信時のユーザーバブルと統一するため、確定時にバブル表示
-      this.addMessage('user', this.pendingUserTranscript);
-      this.pendingUserTranscript = '';
-    }
+  protected handleLiveInputTranscription(_text: string) {
+    // input_audio_transcription 廃止: 何もしない
   }
 
   protected handleLiveAudio(base64: string) {
     // AI音声受信 = ユーザー発話確定
-    this.finalizeUserTranscript();
+
     // ショップ表示後のLiveAPI音声は抑制（Cloud TTSで代替済み）
     if (this.suppressNextLiveAudio) return;
     this.pendingAudioChunks.push(base64);
@@ -464,7 +452,7 @@ export class CoreController {
   protected handleLiveTurnComplete() {
     console.log(`[LiveAPI] TurnComplete: textLen=${this.pendingResponseText.length}, audioChunks=${this.pendingAudioChunks.length}, suppress=${this.suppressNextLiveAudio}, initialPending=${this.isInitialGreetingPending}`);
     this.hideWaitOverlay();
-    this.finalizeUserTranscript();
+
 
     // ショップ表示後のLiveAPI音声ターンは完全スキップ
     if (this.suppressNextLiveAudio) {
@@ -521,7 +509,7 @@ export class CoreController {
 
   protected handleLiveShops(data: { response: string; shops: any[]; ttsAudio?: string }) {
     this.hideWaitOverlay();
-    this.finalizeUserTranscript();
+
 
     const { response, shops, ttsAudio } = data;
 

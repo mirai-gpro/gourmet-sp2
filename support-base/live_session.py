@@ -243,7 +243,6 @@ def build_live_config(system_prompt, mode='chat'):
     return {
         "response_modalities": ["AUDIO"],
         "system_instruction": system_prompt,
-        "input_audio_transcription": {},
         "output_audio_transcription": {},
         "speech_config": {
             "language_code": "ja-JP",
@@ -530,16 +529,6 @@ class LiveSession:
                     if hasattr(sc, 'interrupted') and sc.interrupted:
                         self._ws_send(json.dumps({'type': 'interrupted'}))
                         continue
-
-                    # 入力トランスクリプション（stt_stream.py: input_transcription）
-                    if hasattr(sc, 'input_transcription') and sc.input_transcription:
-                        text = sc.input_transcription.text
-                        if text:
-                            self._add_to_history('User', text)
-                            self._ws_send(json.dumps({
-                                'type': 'input_transcription',
-                                'data': text
-                            }))
 
                     # 出力トランスクリプション（stt_stream.py: output_transcription）
                     if hasattr(sc, 'output_transcription') and sc.output_transcription:
