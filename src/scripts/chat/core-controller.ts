@@ -335,6 +335,11 @@ export class CoreController {
       // LiveAPI WebSocket接続を即座に開始（挨拶はLiveAPIが本線）
       this.initLiveConnection();
 
+      // LiveAPI挨拶到着まで待機アニメーション表示
+      // （RESTプレースホルダーが先に見えているため、ユーザーに待機中であることを伝える）
+      // handleLiveTurnComplete の hideWaitOverlay() で自動的に非表示になる
+      this.showWaitOverlay();
+
       // ショップカード紹介用のTTSを事前生成（バックグラウンド）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
