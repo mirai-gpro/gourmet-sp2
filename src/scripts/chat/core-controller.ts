@@ -16,6 +16,7 @@ export class CoreController {
   protected isProcessing = false;
   protected isRecording = false;
   protected waitOverlayTimer: number | null = null;
+  protected waitAnnouncementTimer: number | null = null;
   protected isTTSEnabled = true;
   protected isUserInteracted = false;
   protected currentShops: any[] = [];
@@ -342,7 +343,7 @@ export class CoreController {
       // ショップカード紹介用のTTSを事前生成（バックグラウンド）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
-        this.t('ackYes'), this.t('ttsIntro')
+        this.t('ackYes'), this.t('ttsIntro'), this.t('additionalResponse')
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
@@ -383,8 +384,6 @@ export class CoreController {
   // ========================================
 
   protected handleLiveSearching() {
-    // ユーザー発話を確定
-
     // 即座にウエイティングアニメーション表示
     this.showWaitOverlay();
 
@@ -402,6 +401,21 @@ export class CoreController {
         this.isAISpeaking = false;
       }).catch(() => { this.isAISpeaking = false; });
     }
+
+    // 5秒後に「只今、お店の情報を確認中です...」アナウンス（UX対策）
+    if (this.waitAnnouncementTimer) clearTimeout(this.waitAnnouncementTimer);
+    this.waitAnnouncementTimer = window.setTimeout(() => {
+      this.waitAnnouncementTimer = null;
+      const addText = this.t('additionalResponse');
+      const addAudio = this.preGeneratedAcks.get(addText);
+      if (addAudio && this.isTTSEnabled && this.isUserInteracted && !this.isAISpeaking) {
+        console.log('[LiveAPI] Playing wait announcement:', addText);
+        this.isAISpeaking = true;
+        this.audioManager.playMp3Audio(addAudio).then(() => {
+          this.isAISpeaking = false;
+        }).catch(() => { this.isAISpeaking = false; });
+      }
+    }, 5000);
   }
 
   protected handleLiveText(text: string) {
@@ -774,6 +788,7 @@ export class CoreController {
 
   protected hideWaitOverlay() {
     if (this.waitOverlayTimer) { clearTimeout(this.waitOverlayTimer); this.waitOverlayTimer = null; }
+    if (this.waitAnnouncementTimer) { clearTimeout(this.waitAnnouncementTimer); this.waitAnnouncementTimer = null; }
     this.els.waitOverlay.classList.add('hidden');
     setTimeout(() => this.els.waitVideo.pause(), 500);
   }
