@@ -28,6 +28,9 @@ export class CoreController {
   protected currentMode: 'chat' | 'concierge' = 'chat';
   protected suppressNextLiveAudio = false;
 
+  // LiveAPI初回挨拶フラグ: REST表示済みテキストをLiveAPI挨拶で上書き
+  protected isInitialGreetingPending = false;
+
   // LiveAPI応答蓄積用
   protected pendingResponseText = '';
   protected pendingAudioChunks: string[] = [];
@@ -321,16 +324,15 @@ export class CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // 初期メッセージ: サーバーから返されたものを優先（コンシェルジュモードの個別挨拶対応）
+      // 初期メッセージ: プレースホルダーとして即時表示（LiveAPI挨拶到着時に上書き）
       const initialMsg = data.initial_message || this.t('initialGreeting');
       this.addMessage('assistant', initialMsg, null, true);
+      this.isInitialGreetingPending = true;
 
-      // サーバーで事前生成済みの初期TTS → 即座に再生開始（遅延ゼロ）
-      const initialTtsPromise = data.initial_tts
-        ? this.playPreGeneratedTts(data.initial_tts)
-        : this.speakTextGCP(initialMsg);
+      // LiveAPI WebSocket接続を即座に開始（挨拶はLiveAPIが本線）
+      this.initLiveConnection();
 
-      // ショップカード紹介用のTTSを事前生成（初期TTS再生と並行）
+      // ショップカード紹介用のTTSを事前生成（バックグラウンド）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
         this.t('ackYes'), this.t('ttsIntro')
@@ -353,10 +355,7 @@ export class CoreController {
         } catch (_e) { }
       });
 
-      // LiveAPI WebSocket接続をTTS完了待ちせず即座に開始（応答速度改善）
-      this.initLiveConnection();
-
-      // UI有効化もTTS完了前に行う
+      // UI有効化
       this.els.userInput.disabled = false;
       this.els.sendBtn.disabled = false;
       this.els.micBtn.disabled = false;
@@ -364,11 +363,8 @@ export class CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // TTS再生とack事前生成はバックグラウンドで完了を待つ
-      Promise.all([
-        initialTtsPromise,
-        ...ackPromises
-      ]).catch(e => console.warn('[Core] TTS background error:', e));
+      // ack事前生成はバックグラウンドで完了を待つ
+      Promise.all(ackPromises).catch(e => console.warn('[Core] TTS background error:', e));
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
@@ -466,7 +462,16 @@ export class CoreController {
     }
 
     if (this.pendingResponseText) {
-      this.addMessage('assistant', this.pendingResponseText);
+      if (this.isInitialGreetingPending) {
+        // LiveAPI挨拶が到着 → RESTプレースホルダーを上書き（バブル追加しない）
+        const initialEl = this.els.chatArea.querySelector('.message.assistant[data-initial="true"] .message-text');
+        if (initialEl) {
+          initialEl.textContent = this.pendingResponseText;
+        }
+        this.isInitialGreetingPending = false;
+      } else {
+        this.addMessage('assistant', this.pendingResponseText);
+      }
       this.currentAISpeech = this.pendingResponseText;
       this.lastAISpeech = this.normalizeText(this.pendingResponseText);
 
