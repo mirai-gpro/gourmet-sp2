@@ -405,6 +405,8 @@ export class CoreController {
   }
 
   protected handleLiveText(text: string) {
+    // AIテキスト到着 = ユーザー発話確定（ユーザーバブルをAI回答より先に表示）
+    this.finalizeUserTranscript();
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
     if (!this.suppressNextLiveAudio) {
       this.pendingResponseText += text;
