@@ -566,10 +566,8 @@ export class CoreController {
     this.els.voiceStatus.className = 'voice-status speaking';
 
     try {
-      // 全チャンクを audioManager.playPcmAudio でキュー再生
-      for (const chunk of chunks) {
-        await this.audioManager.playPcmAudio(chunk, OUTPUT_SAMPLE_RATE);
-      }
+      // 全チャンクを結合して一括再生（旧 WAV 方式と同等の即時再生）
+      await this.audioManager.playPcmChunks(chunks, OUTPUT_SAMPLE_RATE);
     } catch {}
 
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
