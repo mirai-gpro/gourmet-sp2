@@ -223,6 +223,9 @@ export class CoreController {
           return;
         }
 
+        // AudioContext 復帰（§2.8: iOS バックグラウンド復帰対応）
+        this.audioManager.resumeAudioContext();
+
         // LiveAPI WebSocket再接続
         if (this.liveWs && !this.liveWs.isConnected() && this.sessionId) {
           console.log('[Foreground] Reconnecting LiveAPI WebSocket...');
@@ -387,15 +390,13 @@ export class CoreController {
     if (ackAudio && this.isTTSEnabled && this.isUserInteracted) {
       console.log('[LiveAPI] Playing pre-generated ack:', ackText);
       this.isAISpeaking = true;
-      this.ttsPlayer.src = `data:audio/mp3;base64,${ackAudio}`;
       this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
       this.els.voiceStatus.className = 'voice-status speaking';
-      this.ttsPlayer.onended = () => {
+      this.audioManager.playMp3Audio(ackAudio).then(() => {
         this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
         this.els.voiceStatus.className = 'voice-status stopped';
         this.isAISpeaking = false;
-      };
-      this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+      }).catch(() => { this.isAISpeaking = false; });
     }
   }
 
@@ -530,18 +531,16 @@ export class CoreController {
         }, 300);
       }
 
-      // ショップカード紹介はCloud TTS（REST維持）
+      // ショップカード紹介はCloud TTS（REST維持）→ audioManager.playMp3Audio
       if (ttsAudio && this.isTTSEnabled && this.isUserInteracted) {
         this.isAISpeaking = true;
-        this.ttsPlayer.src = `data:audio/mp3;base64,${ttsAudio}`;
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
         this.els.voiceStatus.className = 'voice-status speaking';
-        this.ttsPlayer.onended = () => {
+        this.audioManager.playMp3Audio(ttsAudio).then(() => {
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;
-        };
-        this.ttsPlayer.play().catch(() => { this.isAISpeaking = false; });
+        }).catch(() => { this.isAISpeaking = false; });
       }
     }
 
@@ -562,78 +561,20 @@ export class CoreController {
   // ========================================
 
   protected async playLiveAudioChunks(chunks: string[]) {
-    // 全チャンクのbase64をデコードして結合
-    const allBytes: number[] = [];
-    for (const chunk of chunks) {
-      const binary = atob(chunk);
-      for (let i = 0; i < binary.length; i++) {
-        allBytes.push(binary.charCodeAt(i));
-      }
-    }
-    const pcmData = new Uint8Array(allBytes);
-
-    // PCM → WAVヘッダー付きBlobに変換
-    const wavHeader = this.createWavHeader(pcmData.length, OUTPUT_SAMPLE_RATE, 16, 1);
-    const wav = new Blob([wavHeader, pcmData], { type: 'audio/wav' });
-    const url = URL.createObjectURL(wav);
-
-    // 既存のttsPlayerで再生
     this.isAISpeaking = true;
-    this.ttsPlayer.src = url;
     this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
     this.els.voiceStatus.className = 'voice-status speaking';
 
-    await new Promise<void>((resolve) => {
-      this.ttsPlayer.onended = () => {
-        URL.revokeObjectURL(url);
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        this.isAISpeaking = false;
-        resolve();
-      };
-      this.ttsPlayer.onerror = () => {
-        URL.revokeObjectURL(url);
-        this.isAISpeaking = false;
-        resolve();
-      };
-      this.ttsPlayer.play().catch(() => {
-        URL.revokeObjectURL(url);
-        this.isAISpeaking = false;
-        resolve();
-      });
-    });
-  }
+    try {
+      // 全チャンクを audioManager.playPcmAudio でキュー再生
+      for (const chunk of chunks) {
+        await this.audioManager.playPcmAudio(chunk, OUTPUT_SAMPLE_RATE);
+      }
+    } catch {}
 
-  protected createWavHeader(dataLength: number, sampleRate: number, bitsPerSample: number, channels: number): ArrayBuffer {
-    const buffer = new ArrayBuffer(44);
-    const view = new DataView(buffer);
-
-    // RIFF header
-    this.writeString(view, 0, 'RIFF');
-    view.setUint32(4, 36 + dataLength, true);
-    this.writeString(view, 8, 'WAVE');
-
-    // fmt chunk
-    this.writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // PCM
-    view.setUint16(22, channels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * channels * bitsPerSample / 8, true);
-    view.setUint16(32, channels * bitsPerSample / 8, true);
-    view.setUint16(34, bitsPerSample, true);
-
-    // data chunk
-    this.writeString(view, 36, 'data');
-    view.setUint32(40, dataLength, true);
-
-    return buffer;
-  }
-
-  private writeString(view: DataView, offset: number, str: string) {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+    this.els.voiceStatus.className = 'voice-status stopped';
+    this.isAISpeaking = false;
   }
 
   // ========================================
@@ -649,7 +590,7 @@ export class CoreController {
       return;
     }
 
-    if (this.isProcessing || this.isAISpeaking || !this.ttsPlayer.paused) {
+    if (this.isProcessing || this.isAISpeaking || this.audioManager.isPlaying) {
       if (this.isProcessing && this.liveWs) {
         this.liveWs.sendCancel();
       }
@@ -812,34 +753,19 @@ export class CoreController {
 
   protected async playPreGeneratedTts(audioBase64: string): Promise<void> {
     if (!this.isTTSEnabled || !audioBase64) return;
+    if (!this.isUserInteracted) return;
 
     this.isAISpeaking = true;
-    this.ttsPlayer.src = `data:audio/mp3;base64,${audioBase64}`;
     this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
     this.els.voiceStatus.className = 'voice-status speaking';
 
-    return new Promise<void>((resolve) => {
-      this.ttsPlayer.onended = () => {
-        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-        this.els.voiceStatus.className = 'voice-status stopped';
-        this.isAISpeaking = false;
-        resolve();
-      };
-      this.ttsPlayer.onerror = () => {
-        this.isAISpeaking = false;
-        resolve();
-      };
+    try {
+      await this.audioManager.playMp3Audio(audioBase64);
+    } catch {}
 
-      if (this.isUserInteracted) {
-        this.ttsPlayer.play().catch(() => {
-          this.isAISpeaking = false;
-          resolve();
-        });
-      } else {
-        this.isAISpeaking = false;
-        resolve();
-      }
-    });
+    this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+    this.els.voiceStatus.className = 'voice-status stopped';
+    this.isAISpeaking = false;
   }
 
   // ========================================
@@ -851,7 +777,7 @@ export class CoreController {
     if (!this.isTTSEnabled || !text) return Promise.resolve();
 
     if (stopPrevious && this.isTTSEnabled) {
-      this.ttsPlayer.pause();
+      this.audioManager.stopAll();
     }
 
     const cleanText = this.stripMarkdown(text);
@@ -874,29 +800,17 @@ export class CoreController {
       });
       const data = await response.json();
       if (data.success && data.audio) {
-        this.ttsPlayer.src = `data:audio/mp3;base64,${data.audio}`;
-        const playPromise = new Promise<void>((resolve) => {
-          this.ttsPlayer.onended = async () => {
-            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-            this.els.voiceStatus.className = 'voice-status stopped';
-            this.isAISpeaking = false;
-            if (autoRestartMic) {
-              if (!this.isRecording) {
-                try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
-              }
-            }
-            resolve();
-          };
-          this.ttsPlayer.onerror = () => {
-            this.isAISpeaking = false;
-            resolve();
-          };
-        });
-
         if (this.isUserInteracted) {
           this.lastAISpeech = this.normalizeText(cleanText);
-          await this.ttsPlayer.play();
-          await playPromise;
+          await this.audioManager.playMp3Audio(data.audio);
+          this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+          this.els.voiceStatus.className = 'voice-status stopped';
+          this.isAISpeaking = false;
+          if (autoRestartMic) {
+            if (!this.isRecording) {
+              try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
+            }
+          }
         } else {
           this.showClickPrompt();
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
@@ -939,6 +853,7 @@ export class CoreController {
   }
 
   protected stopCurrentAudio() {
+    this.audioManager.stopAll();
     this.ttsPlayer.pause();
     this.ttsPlayer.currentTime = 0;
   }
