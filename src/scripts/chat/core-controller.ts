@@ -335,6 +335,11 @@ export class CoreController {
       // LiveAPI WebSocket接続を即座に開始（挨拶はLiveAPIが本線）
       this.initLiveConnection();
 
+      // LiveAPI挨拶到着まで待機アニメーション表示
+      // （RESTプレースホルダーが先に見えているため、ユーザーに待機中であることを伝える）
+      // handleLiveTurnComplete の hideWaitOverlay() で自動的に非表示になる
+      this.showWaitOverlay();
+
       // ショップカード紹介用のTTSを事前生成（バックグラウンド）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
@@ -566,10 +571,8 @@ export class CoreController {
     this.els.voiceStatus.className = 'voice-status speaking';
 
     try {
-      // 全チャンクを audioManager.playPcmAudio でキュー再生
-      for (const chunk of chunks) {
-        await this.audioManager.playPcmAudio(chunk, OUTPUT_SAMPLE_RATE);
-      }
+      // 全チャンクを結合して一括再生（旧 WAV 方式と同等の即時再生）
+      await this.audioManager.playPcmChunks(chunks, OUTPUT_SAMPLE_RATE);
     } catch {}
 
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');

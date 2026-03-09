@@ -136,18 +136,23 @@ export class AudioManager {
     if (this.canSendAudio) return;
 
     this.onAudioChunkCallback = onAudioChunk;
+    const t0 = performance.now();
 
     // --- AudioContext 確保（シングルトン）---
     await this.ensureAudioContext();
+    const t1 = performance.now();
 
     // --- MediaStream 確保（§7.1 再利用で getUserMedia 呼び出し最小化）---
     await this.ensureMediaStream();
+    const t2 = performance.now();
 
     // --- AudioWorklet 確保（addModule は1回のみ）---
     await this.ensureWorkletNode();
+    const t3 = performance.now();
 
     // 送信開始
     this.canSendAudio = true;
+    console.log(`[AudioManager] startStreaming: ctx=${(t1-t0).toFixed(0)}ms, stream=${(t2-t1).toFixed(0)}ms, worklet=${(t3-t2).toFixed(0)}ms, total=${(t3-t0).toFixed(0)}ms`);
 
     // MAX_RECORDING_TIME 安全弁
     this.recordingTimer = window.setTimeout(() => {
@@ -170,18 +175,22 @@ export class AudioManager {
   // §2.7 AI 音声再生
   // ============================================================
 
-  /** キュー方式ギャップレス再生（LiveAPI PCM チャンク用） */
-  async playPcmAudio(base64Data: string, sampleRate: number = 24000): Promise<void> {
-    const gen = this.playbackGeneration;
+  /** 複数 base64 PCM チャンクを結合して一括再生 */
+  async playPcmChunks(base64Chunks: string[], sampleRate: number = 24000): Promise<void> {
+    this.stopAll();
     await this.ensureAudioContext();
-    if (gen !== this.playbackGeneration) return; // stopAll が呼ばれた
 
     const ctx = this.audioCtx!;
 
-    // base64 → Int16 → Float32 → AudioBuffer
-    const binary = atob(base64Data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    // 全チャンクを結合: base64 → バイト列
+    const allBytes: number[] = [];
+    for (const chunk of base64Chunks) {
+      const binary = atob(chunk);
+      for (let i = 0; i < binary.length; i++) {
+        allBytes.push(binary.charCodeAt(i));
+      }
+    }
+    const bytes = new Uint8Array(allBytes);
     const int16 = new Int16Array(bytes.buffer);
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) {
@@ -191,33 +200,26 @@ export class AudioManager {
     const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
     audioBuffer.getChannelData(0).set(float32);
 
-    // 先読み制限: スケジュールが先行しすぎたら待機
-    const now = ctx.currentTime;
-    if (this.nextPlayTime > now + this.MAX_SCHEDULE_AHEAD) {
-      const waitMs = (this.nextPlayTime - now - this.MAX_SCHEDULE_AHEAD) * 1000;
-      await new Promise(r => setTimeout(r, waitMs));
-      if (gen !== this.playbackGeneration) return;
-    }
+    return new Promise<void>((resolve) => {
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
 
-    // スケジューリング
-    const startTime = Math.max(ctx.currentTime, this.nextPlayTime);
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
+      const gen = this.playbackGeneration;
+      source.onended = () => {
+        source.disconnect();
+        const idx = this.scheduledSources.indexOf(source);
+        if (idx >= 0) this.scheduledSources.splice(idx, 1);
+        if (gen === this.playbackGeneration) {
+          this._isPlaying = false;
+        }
+        resolve();
+      };
 
-    source.onended = () => {
-      source.disconnect();
-      const idx = this.scheduledSources.indexOf(source);
-      if (idx >= 0) this.scheduledSources.splice(idx, 1);
-      if (this.scheduledSources.length === 0) {
-        this._isPlaying = false;
-      }
-    };
-
-    this.scheduledSources.push(source);
-    source.start(startTime);
-    this.nextPlayTime = startTime + audioBuffer.duration;
-    this._isPlaying = true;
+      this.scheduledSources.push(source);
+      source.start();
+      this._isPlaying = true;
+    });
   }
 
   /** 単発再生（ack 音声、GCP TTS 等の MP3） */
