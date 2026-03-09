@@ -16,6 +16,7 @@ export class CoreController {
   protected isProcessing = false;
   protected isRecording = false;
   protected waitOverlayTimer: number | null = null;
+  protected waitAnnouncementTimer: number | null = null;
   protected isTTSEnabled = true;
   protected isUserInteracted = false;
   protected currentShops: any[] = [];
@@ -36,7 +37,7 @@ export class CoreController {
   protected liveReady = false;
 
   // ユーザー発話トランスクリプション蓄積用
-  protected pendingUserTranscript = '';
+
 
   // AI応答ストリーミング表示用
   protected streamingMsgEl: HTMLElement | null = null;
@@ -283,6 +284,9 @@ export class CoreController {
       onShops: (data: { response: string; shops: any[]; ttsAudio?: string }) => {
         this.handleLiveShops(data);
       },
+      onShopsUpdate: (data: { response: string; shops: any[] }) => {
+        this.handleLiveShopsUpdate(data);
+      },
       onSearching: () => {
         this.handleLiveSearching();
       },
@@ -342,7 +346,7 @@ export class CoreController {
       // ショップカード紹介用のTTSを事前生成（バックグラウンド）
       const ackTexts = [
         this.t('ackConfirm'), this.t('ackSearch'), this.t('ackUnderstood'),
-        this.t('ackYes'), this.t('ttsIntro')
+        this.t('ackYes'), this.t('ttsIntro'), this.t('additionalResponse')
       ];
       const langConfig = this.LANGUAGE_CODE_MAP[this.currentLanguage];
 
@@ -383,8 +387,6 @@ export class CoreController {
   // ========================================
 
   protected handleLiveSearching() {
-    // ユーザー発話を確定
-    this.finalizeUserTranscript();
     // 即座にウエイティングアニメーション表示
     this.showWaitOverlay();
 
@@ -402,6 +404,21 @@ export class CoreController {
         this.isAISpeaking = false;
       }).catch(() => { this.isAISpeaking = false; });
     }
+
+    // 5秒後に「只今、お店の情報を確認中です...」アナウンス（UX対策）
+    if (this.waitAnnouncementTimer) clearTimeout(this.waitAnnouncementTimer);
+    this.waitAnnouncementTimer = window.setTimeout(() => {
+      this.waitAnnouncementTimer = null;
+      const addText = this.t('additionalResponse');
+      const addAudio = this.preGeneratedAcks.get(addText);
+      if (addAudio && this.isTTSEnabled && this.isUserInteracted && !this.isAISpeaking) {
+        console.log('[LiveAPI] Playing wait announcement:', addText);
+        this.isAISpeaking = true;
+        this.audioManager.playMp3Audio(addAudio).then(() => {
+          this.isAISpeaking = false;
+        }).catch(() => { this.isAISpeaking = false; });
+      }
+    }, 5000);
   }
 
   protected handleLiveText(text: string) {
@@ -422,23 +439,13 @@ export class CoreController {
     }
   }
 
-  protected handleLiveInputTranscription(text: string) {
-    // input_audio_transcription はLLM入力ではなく参考情報のみ（チャット表示しない）
-    this.pendingUserTranscript += text;
-  }
-
-  // ユーザー発話トランスクリプションを確定
-  protected finalizeUserTranscript() {
-    if (this.pendingUserTranscript) {
-      // テキスト送信時のユーザーバブルと統一するため、確定時にバブル表示
-      this.addMessage('user', this.pendingUserTranscript);
-      this.pendingUserTranscript = '';
-    }
+  protected handleLiveInputTranscription(_text: string) {
+    // input_audio_transcription 廃止: 何もしない
   }
 
   protected handleLiveAudio(base64: string) {
     // AI音声受信 = ユーザー発話確定
-    this.finalizeUserTranscript();
+
     // ショップ表示後のLiveAPI音声は抑制（Cloud TTSで代替済み）
     if (this.suppressNextLiveAudio) return;
     this.pendingAudioChunks.push(base64);
@@ -462,7 +469,7 @@ export class CoreController {
   protected handleLiveTurnComplete() {
     console.log(`[LiveAPI] TurnComplete: textLen=${this.pendingResponseText.length}, audioChunks=${this.pendingAudioChunks.length}, suppress=${this.suppressNextLiveAudio}, initialPending=${this.isInitialGreetingPending}`);
     this.hideWaitOverlay();
-    this.finalizeUserTranscript();
+
 
     // ショップ表示後のLiveAPI音声ターンは完全スキップ
     if (this.suppressNextLiveAudio) {
@@ -519,7 +526,7 @@ export class CoreController {
 
   protected handleLiveShops(data: { response: string; shops: any[]; ttsAudio?: string }) {
     this.hideWaitOverlay();
-    this.finalizeUserTranscript();
+
 
     const { response, shops, ttsAudio } = data;
 
@@ -569,6 +576,32 @@ export class CoreController {
 
     this.isProcessing = false;
     this.resetInputState();
+  }
+
+  protected handleLiveShopsUpdate(data: { response: string; shops: any[] }) {
+    // 全軒完了 → ショップカードを差し替え表示（TTS は1軒目先行時に再生済み）
+    const { response, shops } = data;
+
+    if (shops && shops.length > 0) {
+      this.currentShops = shops;
+
+      // チャットバブルの応答テキストを全軒版に差し替え
+      if (response) {
+        // 既存のassistantバブルの最後のものを更新
+        const bubbles = this.els.chatArea.querySelectorAll('.message.assistant .message-text');
+        if (bubbles.length > 0) {
+          bubbles[bubbles.length - 1].textContent = response;
+        }
+        this.currentAISpeech = response;
+      }
+
+      // ショップカードを全軒で差し替え
+      document.dispatchEvent(new CustomEvent('displayShops', {
+        detail: { shops, language: this.currentLanguage }
+      }));
+    }
+
+    console.log(`[LiveAPI] Shops updated: ${shops?.length || 0} shops`);
   }
 
   // ========================================
@@ -784,6 +817,7 @@ export class CoreController {
 
   protected hideWaitOverlay() {
     if (this.waitOverlayTimer) { clearTimeout(this.waitOverlayTimer); this.waitOverlayTimer = null; }
+    if (this.waitAnnouncementTimer) { clearTimeout(this.waitAnnouncementTimer); this.waitAnnouncementTimer = null; }
     this.els.waitOverlay.classList.add('hidden');
     setTimeout(() => this.els.waitVideo.pause(), 500);
   }
