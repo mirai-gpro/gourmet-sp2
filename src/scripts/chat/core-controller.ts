@@ -284,6 +284,9 @@ export class CoreController {
       onShops: (data: { response: string; shops: any[]; ttsAudio?: string }) => {
         this.handleLiveShops(data);
       },
+      onShopsUpdate: (data: { response: string; shops: any[] }) => {
+        this.handleLiveShopsUpdate(data);
+      },
       onSearching: () => {
         this.handleLiveSearching();
       },
@@ -573,6 +576,32 @@ export class CoreController {
 
     this.isProcessing = false;
     this.resetInputState();
+  }
+
+  protected handleLiveShopsUpdate(data: { response: string; shops: any[] }) {
+    // 全軒完了 → ショップカードを差し替え表示（TTS は1軒目先行時に再生済み）
+    const { response, shops } = data;
+
+    if (shops && shops.length > 0) {
+      this.currentShops = shops;
+
+      // チャットバブルの応答テキストを全軒版に差し替え
+      if (response) {
+        // 既存のassistantバブルの最後のものを更新
+        const bubbles = this.els.chatArea.querySelectorAll('.message.assistant .message-text');
+        if (bubbles.length > 0) {
+          bubbles[bubbles.length - 1].textContent = response;
+        }
+        this.currentAISpeech = response;
+      }
+
+      // ショップカードを全軒で差し替え
+      document.dispatchEvent(new CustomEvent('displayShops', {
+        detail: { shops, language: this.currentLanguage }
+      }));
+    }
+
+    console.log(`[LiveAPI] Shops updated: ${shops?.length || 0} shops`);
   }
 
   // ========================================
