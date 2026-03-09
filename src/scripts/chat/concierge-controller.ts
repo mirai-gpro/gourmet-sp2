@@ -139,15 +139,23 @@ export class ConciergeController extends CoreController {
     if (this.els.avatarContainer && data.ttsAudio) {
       this.els.avatarContainer.classList.add('speaking');
     }
+    // 親の handleLiveShops は audioManager.playMp3Audio を使用（Promise ベース）
+    // playMp3Audio の完了後にアバターアニメーションを停止するため、
+    // 親の処理完了を待ってから停止をスケジュール
     super.handleLiveShops(data);
-    // TTS再生完了後にアニメーション停止（ttsPlayerのonendedで処理）
-    const originalOnEnded = this.ttsPlayer.onended;
-    this.ttsPlayer.onended = (event) => {
+    // audioManager.playMp3Audio は非同期なので、isPlaying を監視して停止
+    if (data.ttsAudio && this.isTTSEnabled && this.isUserInteracted) {
+      const checkDone = () => {
+        if (!this.audioManager.isPlaying) {
+          this.stopAvatarAnimation();
+        } else {
+          setTimeout(checkDone, 200);
+        }
+      };
+      setTimeout(checkDone, 200);
+    } else {
       this.stopAvatarAnimation();
-      if (originalOnEnded && typeof originalOnEnded === 'function') {
-        originalOnEnded.call(this.ttsPlayer, event);
-      }
-    };
+    }
   }
 
   // コンシェルジュモード固有: 事前生成TTS再生にアバターアニメーション追加
@@ -164,7 +172,7 @@ export class ConciergeController extends CoreController {
     if (skipAudio || !this.isTTSEnabled || !text) return Promise.resolve();
 
     if (stopPrevious) {
-      this.ttsPlayer.pause();
+      this.audioManager.stopAll();
     }
 
     // アバターアニメーションを開始
@@ -172,7 +180,7 @@ export class ConciergeController extends CoreController {
       this.els.avatarContainer.classList.add('speaking');
     }
 
-    // 親クラスのTTS処理を実行
+    // 親クラスのTTS処理を実行（audioManager.playMp3Audio ベース）
     await super.speakTextGCP(text, stopPrevious, autoRestartMic, skipAudio);
 
     // アバターアニメーションを停止
