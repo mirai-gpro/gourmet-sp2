@@ -40,6 +40,9 @@ export class CoreController {
   protected pendingUserTranscript = '';
   protected pendingUserMsgEl: HTMLElement | null = null;
 
+  // AI応答ストリーミング表示用
+  protected streamingMsgEl: HTMLElement | null = null;
+
   // バックグラウンド状態の追跡
   protected isInBackground = false;
   protected backgroundStartTime = 0;
@@ -162,6 +165,7 @@ export class CoreController {
     this.suppressNextLiveAudio = false;
     this.pendingUserTranscript = '';
     this.pendingUserMsgEl = null;
+    this.streamingMsgEl = null;
 
     await new Promise(resolve => setTimeout(resolve, 300));
     await this.initializeSession();
@@ -407,6 +411,17 @@ export class CoreController {
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
     if (!this.suppressNextLiveAudio) {
       this.pendingResponseText += text;
+
+      // ストリーミング表示: テキスト到着時にリアルタイムでバブルに反映
+      if (this.streamingMsgEl) {
+        const span = this.streamingMsgEl.querySelector('.message-text');
+        if (span) span.textContent = this.pendingResponseText;
+      } else if (!this.isInitialGreetingPending) {
+        // 初回挨拶以外: ストリーミングバブルを作成
+        this.hideWaitOverlay();
+        this.streamingMsgEl = this.addMessageElement('assistant', this.pendingResponseText);
+      }
+      this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
     }
   }
 
@@ -444,14 +459,20 @@ export class CoreController {
 
   protected handleLiveInterrupted() {
     // Gemini VAD が割り込みを検知 → 現在の再生を停止
+    console.log(`[LiveAPI] INTERRUPTED: pendingText="${this.pendingResponseText.slice(0, 50)}", audioChunks=${this.pendingAudioChunks.length}, isRecording=${this.isRecording}, isAISpeaking=${this.isAISpeaking}`);
     this.stopCurrentAudio();
     this.pendingAudioChunks = [];
     this.pendingResponseText = '';
     this.isAISpeaking = false;
     this.suppressNextLiveAudio = false;
+    // 進行中のストリーミングテキストバブルもクリア
+    if (this.streamingMsgEl) {
+      this.streamingMsgEl = null;
+    }
   }
 
   protected handleLiveTurnComplete() {
+    console.log(`[LiveAPI] TurnComplete: textLen=${this.pendingResponseText.length}, audioChunks=${this.pendingAudioChunks.length}, suppress=${this.suppressNextLiveAudio}, initialPending=${this.isInitialGreetingPending}`);
     this.hideWaitOverlay();
     this.finalizeUserTranscript();
 
@@ -460,19 +481,25 @@ export class CoreController {
       this.suppressNextLiveAudio = false;
       this.pendingResponseText = '';
       this.pendingAudioChunks = [];
+      this.streamingMsgEl = null;
       this.isProcessing = false;
       this.resetInputState();
       return;
     }
 
     if (this.pendingResponseText) {
-      if (this.isInitialGreetingPending) {
+      if (this.streamingMsgEl) {
+        // ストリーミング表示済み → 最終テキストで確定（バブル追加不要）
+        const span = this.streamingMsgEl.querySelector('.message-text');
+        if (span) span.textContent = this.pendingResponseText;
+        this.streamingMsgEl = null;
+      } else if (this.isInitialGreetingPending) {
         // LiveAPI挨拶が到着 → 初回メッセージとして表示
         this.addMessage('assistant', this.pendingResponseText);
-        this.isInitialGreetingPending = false;
       } else {
         this.addMessage('assistant', this.pendingResponseText);
       }
+      this.isInitialGreetingPending = false;
       this.currentAISpeech = this.pendingResponseText;
       this.lastAISpeech = this.normalizeText(this.pendingResponseText);
 
