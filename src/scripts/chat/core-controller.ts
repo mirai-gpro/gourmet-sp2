@@ -327,16 +327,14 @@ export class CoreController {
       const data = await res.json();
       this.sessionId = data.session_id;
 
-      // 初期メッセージ: プレースホルダーとして即時表示（LiveAPI挨拶到着時に上書き）
-      const initialMsg = data.initial_message || this.t('initialGreeting');
-      this.addMessage('assistant', initialMsg, null, true);
+      // LiveAPI挨拶が本線 → プレースホルダー不要
+      // handleLiveTurnComplete で初回挨拶テキスト + 音声を表示・再生
       this.isInitialGreetingPending = true;
 
-      // LiveAPI WebSocket接続を即座に開始（挨拶はLiveAPIが本線）
+      // LiveAPI WebSocket接続を即座に開始
       this.initLiveConnection();
 
       // LiveAPI挨拶到着まで待機アニメーション表示
-      // （RESTプレースホルダーが先に見えているため、ユーザーに待機中であることを伝える）
       // handleLiveTurnComplete の hideWaitOverlay() で自動的に非表示になる
       this.showWaitOverlay();
 
@@ -469,11 +467,8 @@ export class CoreController {
 
     if (this.pendingResponseText) {
       if (this.isInitialGreetingPending) {
-        // LiveAPI挨拶が到着 → RESTプレースホルダーを上書き（バブル追加しない）
-        const initialEl = this.els.chatArea.querySelector('.message.assistant[data-initial="true"] .message-text');
-        if (initialEl) {
-          initialEl.textContent = this.pendingResponseText;
-        }
+        // LiveAPI挨拶が到着 → 初回メッセージとして表示
+        this.addMessage('assistant', this.pendingResponseText);
         this.isInitialGreetingPending = false;
       } else {
         this.addMessage('assistant', this.pendingResponseText);
@@ -1049,11 +1044,6 @@ export class CoreController {
     if (shopListEmpty) shopListEmpty.textContent = this.t('shopListEmpty');
     const pageFooter = document.getElementById('pageFooter');
     if (pageFooter) pageFooter.innerHTML = `${this.t('footerMessage')} ✨`;
-
-    const initialMessage = this.els.chatArea.querySelector('.message.assistant[data-initial="true"] .message-text');
-    if (initialMessage) {
-      initialMessage.textContent = this.t('initialGreeting');
-    }
 
     const waitText = document.querySelector('.wait-text');
     if (waitText) waitText.textContent = this.t('waitMessage');
