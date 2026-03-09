@@ -258,8 +258,8 @@ def build_live_config(system_prompt, mode='chat'):
                 "disabled": False,
                 "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
                 "end_of_speech_sensitivity": "END_SENSITIVITY_HIGH",
-                "prefix_padding_ms": 100,
-                "silence_duration_ms": 500,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 100,
             }
         },
         "context_window_compression": {

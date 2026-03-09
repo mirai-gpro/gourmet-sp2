@@ -14,7 +14,6 @@ export class CoreController {
   protected currentLanguage: 'ja' | 'en' | 'zh' | 'ko' = 'ja';
   protected sessionId: string | null = null;
   protected isProcessing = false;
-  protected currentStage = 'conversation';
   protected isRecording = false;
   protected waitOverlayTimer: number | null = null;
   protected isTTSEnabled = true;
@@ -38,7 +37,9 @@ export class CoreController {
 
   // ユーザー発話トランスクリプション蓄積用
   protected pendingUserTranscript = '';
-  protected pendingUserMsgEl: HTMLElement | null = null;
+
+  // AI応答ストリーミング表示用
+  protected streamingMsgEl: HTMLElement | null = null;
 
   // バックグラウンド状態の追跡
   protected isInBackground = false;
@@ -161,7 +162,7 @@ export class CoreController {
     this.liveReady = false;
     this.suppressNextLiveAudio = false;
     this.pendingUserTranscript = '';
-    this.pendingUserMsgEl = null;
+    this.streamingMsgEl = null;
 
     await new Promise(resolve => setTimeout(resolve, 300));
     await this.initializeSession();
@@ -407,29 +408,31 @@ export class CoreController {
     // output_audio_transcription からのテキスト（AI発話のテキスト版）
     if (!this.suppressNextLiveAudio) {
       this.pendingResponseText += text;
+
+      // ストリーミング表示: テキスト到着時にリアルタイムでバブルに反映
+      if (this.streamingMsgEl) {
+        const span = this.streamingMsgEl.querySelector('.message-text');
+        if (span) span.textContent = this.pendingResponseText;
+      } else if (!this.isInitialGreetingPending) {
+        // 初回挨拶以外: ストリーミングバブルを作成
+        this.hideWaitOverlay();
+        this.streamingMsgEl = this.addMessageElement('assistant', this.pendingResponseText);
+      }
+      this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
     }
   }
 
   protected handleLiveInputTranscription(text: string) {
-    // input_audio_transcription フラグメントを蓄積して1つのバブルに表示
+    // input_audio_transcription はLLM入力ではなく参考情報のみ（チャット表示しない）
     this.pendingUserTranscript += text;
-
-    if (this.pendingUserMsgEl) {
-      // 既存バブルを更新
-      const span = this.pendingUserMsgEl.querySelector('.message-text');
-      if (span) span.textContent = this.pendingUserTranscript;
-    } else {
-      // 新しいバブルを作成
-      this.pendingUserMsgEl = this.addMessageElement('user', this.pendingUserTranscript);
-    }
-    this.els.chatArea.scrollTop = this.els.chatArea.scrollHeight;
   }
 
   // ユーザー発話トランスクリプションを確定
   protected finalizeUserTranscript() {
     if (this.pendingUserTranscript) {
+      // テキスト送信時のユーザーバブルと統一するため、確定時にバブル表示
+      this.addMessage('user', this.pendingUserTranscript);
       this.pendingUserTranscript = '';
-      this.pendingUserMsgEl = null;
     }
   }
 
@@ -444,14 +447,20 @@ export class CoreController {
 
   protected handleLiveInterrupted() {
     // Gemini VAD が割り込みを検知 → 現在の再生を停止
+    console.log(`[LiveAPI] INTERRUPTED: pendingText="${this.pendingResponseText.slice(0, 50)}", audioChunks=${this.pendingAudioChunks.length}, isRecording=${this.isRecording}, isAISpeaking=${this.isAISpeaking}`);
     this.stopCurrentAudio();
     this.pendingAudioChunks = [];
     this.pendingResponseText = '';
     this.isAISpeaking = false;
     this.suppressNextLiveAudio = false;
+    // 進行中のストリーミングテキストバブルもクリア
+    if (this.streamingMsgEl) {
+      this.streamingMsgEl = null;
+    }
   }
 
   protected handleLiveTurnComplete() {
+    console.log(`[LiveAPI] TurnComplete: textLen=${this.pendingResponseText.length}, audioChunks=${this.pendingAudioChunks.length}, suppress=${this.suppressNextLiveAudio}, initialPending=${this.isInitialGreetingPending}`);
     this.hideWaitOverlay();
     this.finalizeUserTranscript();
 
@@ -460,19 +469,25 @@ export class CoreController {
       this.suppressNextLiveAudio = false;
       this.pendingResponseText = '';
       this.pendingAudioChunks = [];
+      this.streamingMsgEl = null;
       this.isProcessing = false;
       this.resetInputState();
       return;
     }
 
     if (this.pendingResponseText) {
-      if (this.isInitialGreetingPending) {
+      if (this.streamingMsgEl) {
+        // ストリーミング表示済み → 最終テキストで確定（バブル追加不要）
+        const span = this.streamingMsgEl.querySelector('.message-text');
+        if (span) span.textContent = this.pendingResponseText;
+        this.streamingMsgEl = null;
+      } else if (this.isInitialGreetingPending) {
         // LiveAPI挨拶が到着 → 初回メッセージとして表示
         this.addMessage('assistant', this.pendingResponseText);
-        this.isInitialGreetingPending = false;
       } else {
         this.addMessage('assistant', this.pendingResponseText);
       }
+      this.isInitialGreetingPending = false;
       this.currentAISpeech = this.pendingResponseText;
       this.lastAISpeech = this.normalizeText(this.pendingResponseText);
 
@@ -627,8 +642,6 @@ export class CoreController {
           this.showError(this.t('micAccessError'));
         }
       }
-    } else {
-      await this.startLegacyRecording();
     }
   }
 
@@ -638,34 +651,6 @@ export class CoreController {
     this.els.micBtn.classList.remove('recording');
     this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
     this.els.voiceStatus.className = 'voice-status stopped';
-  }
-
-  protected async startLegacyRecording() {
-      try {
-          this.isRecording = true;
-          this.els.micBtn.classList.add('recording');
-          this.els.voiceStatus.innerHTML = this.t('voiceStatusListening');
-
-          await this.audioManager.startLegacyRecording(
-              async (audioBlob) => {
-                  await this.transcribeAudio(audioBlob);
-                  this.stopRecording();
-              },
-              () => { this.els.voiceStatus.innerHTML = this.t('voiceStatusRecording'); }
-          );
-      } catch (error: any) {
-          this.addMessage('system', `${this.t('micAccessError')} ${error.message}`);
-          this.stopRecording();
-      }
-  }
-
-  protected async transcribeAudio(audioBlob: Blob) {
-      console.log('Legacy audio blob size:', audioBlob.size);
-  }
-
-  // 後方互換性
-  protected stopStreamingSTT() {
-    this.stopRecording();
   }
 
   // ========================================
@@ -705,43 +690,9 @@ export class CoreController {
       this.liveWs.sendText(message);
       // 応答はLiveAPIコールバック(handleLiveText/handleLiveTurnComplete/handleLiveShops)で処理
     } else {
-      // フォールバック: REST API
-      try {
-        const response = await fetch(`${this.apiBase}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            session_id: this.sessionId,
-            message: message,
-            stage: this.currentStage,
-            language: this.currentLanguage,
-            mode: this.currentMode
-          })
-        });
-        const data = await response.json();
-
-        this.hideWaitOverlay();
-        this.currentAISpeech = data.response;
-        this.addMessage('assistant', data.response, data.summary);
-
-        if (data.shops && data.shops.length > 0) {
-          this.currentShops = data.shops;
-          this.els.reservationBtn.classList.add('visible');
-          document.dispatchEvent(new CustomEvent('displayShops', {
-            detail: { shops: data.shops, language: this.currentLanguage }
-          }));
-          const section = document.getElementById('shopListSection');
-          if (section) section.classList.add('has-shops');
-        }
-
-        this.speakTextGCP(data.response, true);
-      } catch (error) {
-        console.error('送信エラー:', error);
-        this.hideWaitOverlay();
-        this.showError('メッセージの送信に失敗しました。');
-      } finally {
-        this.resetInputState();
-      }
+      this.hideWaitOverlay();
+      this.showError(this.t('connectionError') || 'LiveAPI接続が切れています。ページを再読み込みしてください。');
+      this.resetInputState();
     }
   }
 
