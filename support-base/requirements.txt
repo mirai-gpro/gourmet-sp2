@@ -14,10 +14,6 @@ google-cloud-storage==2.18.2
 google-cloud-texttospeech>=2.14.0
 google-cloud-speech>=2.21.0
 
-# WebSocket (LiveAPI用)
-flask-sock>=0.7.0
-simple-websocket>=1.0.0
-
 # Web Server
 gunicorn==21.2.0
 
