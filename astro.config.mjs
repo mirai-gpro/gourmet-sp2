@@ -48,9 +48,9 @@ export default defineConfig({
         ]
       },
       workbox: {
-        // ★★★ 修正箇所: '/404' から '/index.html' に変更 ★★★
-        // これでファイル未検出エラーがなくなり、SWが正常起動します
-        navigateFallback: '/index.html',
+        // 静的サイト（複数ページ）ではnavigateFallbackは不要
+        // 各ページが個別のHTMLファイルとしてprecacheされる
+        navigateFallback: null,
         globPatterns: ['**/*.{css,js,html,svg,png,ico,txt}']
       }
     })
