@@ -1039,15 +1039,23 @@ JSON 형식으로 출력:
         """
         ブラウザからの音声チャンクを Gemini にリレー
         stt_stream.py listen_audio 準拠: {"data": bytes, "mime_type": "audio/pcm"}
+
+        注意: このメソッドは Flask スレッドから呼ばれるため、
+        asyncio.Queue への操作は run_coroutine_threadsafe 経由で行う。
+        （send_text() と同じパターン）
         """
         if self.loop and self.audio_queue is not None:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
                 msg = {"data": audio_bytes, "mime_type": "audio/pcm"}
-                # stt_stream.py 準拠: put_nowait() で溢れたら捨てる（ブロックしない）
-                self.audio_queue.put_nowait(msg)
-            except asyncio.QueueFull:
-                pass  # stt_stream.py 準拠: 溢れたチャンクは破棄
+
+                async def _put():
+                    try:
+                        self.audio_queue.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        pass  # stt_stream.py 準拠: 溢れたチャンクは破棄
+
+                asyncio.run_coroutine_threadsafe(_put(), self.loop)
             except Exception as e:
                 logger.error(f"[LiveSession] Audio queue error: {e}")
 
