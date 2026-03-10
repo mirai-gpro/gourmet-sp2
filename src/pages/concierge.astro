@@ -494,10 +494,15 @@ const apiBaseUrl = import.meta.env.PUBLIC_API_URL || '';
         import { registerSW } from 'virtual:pwa-register';
 
         const updateSW = registerSW({
-            immediate: false,
+            immediate: true,
             
             onNeedRefresh() {
-                console.log('[PWA] New content available');
+                console.log('[PWA] New content available - clearing all caches');
+                if ('caches' in window) {
+                    caches.keys().then(names => {
+                        names.forEach(name => caches.delete(name));
+                    });
+                }
                 updateSW(true);
             },
             
