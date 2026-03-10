@@ -10,8 +10,7 @@ export class ConciergeController extends CoreController {
   constructor(container: HTMLElement, apiBase: string) {
     super(container, apiBase);
 
-    // コンシェルジュモード用のAudioManagerを8秒設定で再初期化
-    this.audioManager = new AudioManager(8000);
+    this.audioManager = new AudioManager();
 
     // コンシェルジュモードに設定
     this.currentMode = 'concierge';

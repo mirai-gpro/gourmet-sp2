@@ -133,15 +133,18 @@ LIVE_API_PROMPT_SUPPLEMENT = """
 - JSON、マークダウン、構造化テキストは一切出力しないでください
 - 1回の発話は簡潔に（長文は避ける）
 
-### レストラン検索時の応答フロー（必ず守ること）
+### レストラン検索時の応答フロー（絶対に守ること・違反禁止）
 
-1. **復唱+お待ち（必須）**: ユーザーのリクエストを短く復唱し、検索する旨を伝える（1文で）
+⚠️ **search_restaurants を呼ぶ前に、必ず音声で復唱すること。復唱なしのツール呼び出しは禁止。**
+
+1. **復唱+お待ち（絶対必須・省略禁止）**: まずユーザーのリクエストを短く復唱して声に出す
    - 例: 「恵比寿で焼き鳥ですね、お探しします！」
    - 例: 「渋谷のイタリアンですね、少々お待ちください。」
    - 例: 「かしこまりました。新宿で和食ですね、お調べします。」
-   - **この復唱は必ず声に出してから**ツールを呼び出すこと
+   - **この1文を必ず発話してから**次のステップへ進むこと
 
-2. **ツール呼び出し**: 上記を話した後に search_restaurants を呼び出す
+2. **ツール呼び出し**: 復唱を話し終えた後に search_restaurants を呼び出す
+   - ⚠️ 復唱せずにいきなりツールを呼ぶのは絶対禁止
 
 3. **検索結果の紹介**: ツール結果を受け取った後、簡潔に紹介する
    - 例: 「見つかりました。画面のカードをご覧ください。」
@@ -243,7 +246,6 @@ def build_live_config(system_prompt, mode='chat'):
     return {
         "response_modalities": ["AUDIO"],
         "system_instruction": system_prompt,
-        "input_audio_transcription": {},
         "output_audio_transcription": {},
         "speech_config": {
             "language_code": "ja-JP",
@@ -531,16 +533,6 @@ class LiveSession:
                         self._ws_send(json.dumps({'type': 'interrupted'}))
                         continue
 
-                    # 入力トランスクリプション（stt_stream.py: input_transcription）
-                    if hasattr(sc, 'input_transcription') and sc.input_transcription:
-                        text = sc.input_transcription.text
-                        if text:
-                            self._add_to_history('User', text)
-                            self._ws_send(json.dumps({
-                                'type': 'input_transcription',
-                                'data': text
-                            }))
-
                     # 出力トランスクリプション（stt_stream.py: output_transcription）
                     if hasattr(sc, 'output_transcription') and sc.output_transcription:
                         text = sc.output_transcription.text
@@ -601,19 +593,6 @@ class LiveSession:
                 )
 
                 shops = result.get('shops', [])
-                response_text = result.get('response', '')
-                tts_audio = result.get('tts_audio', '')
-
-                # ショップデータをブラウザに送信
-                self._ws_send(json.dumps({
-                    'type': 'shops',
-                    'data': {
-                        'response': response_text,
-                        'shops': shops,
-                        'ttsAudio': tts_audio
-                    }
-                }))
-
                 logger.info(f"[LiveSession] Shop search: {len(shops)} shops found")
 
                 # ツール結果を Gemini に返す（stt_stream.py: session.send_tool_response）
@@ -708,10 +687,11 @@ class LiveSession:
         """
         Google Places で実在店舗を検索 → enrichment + REST API で詳細説明生成
 
-        遅延対策（gourmet-support 移植）:
-          - enrichment と Gemini REST API 説明生成を並行実行
-          - Gemini が先に完了 → TTS生成開始（enrichment 完了を待たずに）
-          - enrichment 完了 → 結果をマージ
+        1軒目先行送信（gourmet-support 移植）:
+          1. Google Places 検索
+          2. 1軒目の説明+TTS を先行生成 → フロントに即送信（shops メッセージ）
+          3. 残り全軒の enrichment + 説明生成を並行実行
+          4. 全軒完了 → フロントに差し替え送信（shops_update メッセージ）
         """
         try:
             from api_integrations import (
@@ -740,7 +720,41 @@ class LiveSession:
             ]
 
             # ====================================================
-            # 並行処理: enrichment + REST API 説明生成（遅延対策）
+            # Step 1: 1軒目の説明を先行生成 → 即送信
+            # ====================================================
+            first_desc = self._generate_shop_descriptions(
+                shop_basics[:1], query, language
+            )
+            first_response = ''
+            if first_desc:
+                first_response = first_desc.get('message', '')
+                # 1軒目に説明データをマージ
+                desc_list = first_desc.get('descriptions', [])
+                if desc_list and isinstance(desc_list[0], dict):
+                    for key in ['description', 'highlights', 'tips',
+                                'specialty', 'atmosphere', 'features']:
+                        if desc_list[0].get(key):
+                            shops[0][key] = desc_list[0][key]
+
+            if not first_response:
+                first_response = self._build_shop_intro_text(shops[:1], language)
+
+            # 1軒目のTTS生成
+            first_tts = self._generate_tts(first_response, language) if first_response else ''
+
+            # 1軒目を先行送信（ショップカード表示+TTS再生開始）
+            self._ws_send(json.dumps({
+                'type': 'shops',
+                'data': {
+                    'response': first_response,
+                    'shops': [shops[0]],
+                    'ttsAudio': first_tts
+                }
+            }))
+            logger.info(f"[LiveSession] First shop sent: {shops[0].get('name', '')}")
+
+            # ====================================================
+            # Step 2: 残り全軒の enrichment + 説明生成を並行実行
             # ====================================================
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 enrich_future = executor.submit(
@@ -750,23 +764,12 @@ class LiveSession:
                     self._generate_shop_descriptions, shop_basics, query, language
                 )
 
-                # Gemini REST API は通常 enrichment より先に完了する
-                # → 完了次第 TTS 生成を開始（enrichment と並行）
+                # 全軒の説明取得
                 descriptions = desc_future.result()
-                response_text = ''
-                if descriptions:
-                    response_text = descriptions.get('message', '')
-                    logger.info(f"[LiveSession] Gemini descriptions ready: {len(response_text)} chars")
-
-                # TTS 生成（enrichment がまだ実行中でもOK）
-                if not response_text:
-                    response_text = self._build_shop_intro_text(shops, language)
-                tts_audio = self._generate_tts(response_text, language) if response_text else ''
-
                 # enrichment 完了を待つ
                 enriched_shops = enrich_future.result() or shops
 
-            # 説明データを enriched shops にマージ
+            # 全軒の説明データを enriched shops にマージ
             if descriptions:
                 desc_list = descriptions.get('descriptions', [])
                 for shop, desc in zip(enriched_shops, desc_list):
@@ -777,10 +780,24 @@ class LiveSession:
                         if desc.get(key):
                             shop[key] = desc[key]
 
-            logger.info(f"[LiveSession] Search complete: {len(enriched_shops)} shops, "
-                       f"response={len(response_text)} chars")
+            # 全軒の完全データを差し替え送信
+            full_response = ''
+            if descriptions:
+                full_response = descriptions.get('message', '')
+            if not full_response:
+                full_response = self._build_shop_intro_text(enriched_shops, language)
 
-            return {'shops': enriched_shops, 'response': response_text, 'tts_audio': tts_audio}
+            self._ws_send(json.dumps({
+                'type': 'shops_update',
+                'data': {
+                    'response': full_response,
+                    'shops': enriched_shops
+                }
+            }))
+
+            logger.info(f"[LiveSession] Search complete: {len(enriched_shops)} shops")
+
+            return {'shops': enriched_shops, 'response': full_response, 'tts_audio': ''}
 
         except Exception as e:
             logger.error(f"[LiveSession] Restaurant search error: {e}")
@@ -1022,15 +1039,23 @@ JSON 형식으로 출력:
         """
         ブラウザからの音声チャンクを Gemini にリレー
         stt_stream.py listen_audio 準拠: {"data": bytes, "mime_type": "audio/pcm"}
+
+        注意: このメソッドは Flask スレッドから呼ばれるため、
+        asyncio.Queue への操作は run_coroutine_threadsafe 経由で行う。
+        （send_text() と同じパターン）
         """
         if self.loop and self.audio_queue is not None:
             try:
                 audio_bytes = base64.b64decode(audio_base64)
                 msg = {"data": audio_bytes, "mime_type": "audio/pcm"}
-                # stt_stream.py 準拠: put_nowait() で溢れたら捨てる（ブロックしない）
-                self.audio_queue.put_nowait(msg)
-            except asyncio.QueueFull:
-                pass  # stt_stream.py 準拠: 溢れたチャンクは破棄
+
+                async def _put():
+                    try:
+                        self.audio_queue.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        pass  # stt_stream.py 準拠: 溢れたチャンクは破棄
+
+                asyncio.run_coroutine_threadsafe(_put(), self.loop)
             except Exception as e:
                 logger.error(f"[LiveSession] Audio queue error: {e}")
 
