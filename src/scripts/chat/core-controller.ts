@@ -37,7 +37,7 @@ export class CoreController {
   protected liveReady = false;
 
   // ユーザー発話トランスクリプション蓄積用
-
+  protected pendingUserTranscript = '';
 
   // AI応答ストリーミング表示用
   protected streamingMsgEl: HTMLElement | null = null;
