@@ -48,10 +48,10 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // ★★★ 修正箇所: '/404' から '/index.html' に変更 ★★★
+        // これでファイル未検出エラーがなくなり、SWが正常起動します
         navigateFallback: '/index.html',
-        globPatterns: ['**/*.{css,js,html,svg,png,ico,txt}'],
-        navigateFallbackDenylist: [/^\/404/],
-        globIgnores: ['**/404*']
+        globPatterns: ['**/*.{css,js,html,svg,png,ico,txt}']
       }
     })
   ]

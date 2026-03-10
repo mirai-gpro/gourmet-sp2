@@ -22,8 +22,7 @@ interface ServerMessage {
     | 'audio'                // model_turn.parts[].inline_data（PCM音声 base64）
     | 'turn_complete'        // server_content.turn_complete
     | 'interrupted'          // server_content.interrupted（Gemini VAD 割り込み）
-    | 'shops'                // search_restaurants ツール結果（1軒目先行）
-    | 'shops_update'         // search_restaurants 全軒完了（差し替え）
+    | 'shops'                // search_restaurants ツール結果
     | 'searching'            // search_restaurants 検索開始（ウエイティングアニメ発火用）
     | 'error';               // エラー
   data: any;
@@ -47,7 +46,6 @@ export interface LiveCallbacks {
   onTurnComplete: () => void;
   onInterrupted: () => void;
   onShops: (data: { response: string; shops: any[]; ttsAudio?: string }) => void;
-  onShopsUpdate: (data: { response: string; shops: any[] }) => void;
   onSearching: () => void;
   onError: (message: string) => void;
   onClose: () => void;
@@ -111,7 +109,6 @@ export class LiveWebSocket {
           case 'turn_complete':       this.cb.onTurnComplete(); break;
           case 'interrupted':         this.cb.onInterrupted(); break;
           case 'shops':               this.cb.onShops(msg.data); break;
-          case 'shops_update':        this.cb.onShopsUpdate(msg.data); break;
           case 'searching':           this.cb.onSearching(); break;
           case 'error':               this.cb.onError(msg.data); break;
         }

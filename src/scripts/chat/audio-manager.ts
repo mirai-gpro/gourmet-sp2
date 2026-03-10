@@ -13,7 +13,7 @@ const TARGET_SAMPLE_RATE = 16000;
 const MAX_RECORDING_TIME = 60000;
 
 const IOS_BUFFER_SIZE = 8192;
-const DEFAULT_BUFFER_SIZE = 1600;
+const DEFAULT_BUFFER_SIZE = 3200;
 
 const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
@@ -100,6 +100,25 @@ export class AudioManager {
   private playbackGeneration = 0;
   private readonly MAX_SCHEDULE_AHEAD = 0.5; // 秒
 
+  // レガシー録音用（REST API フォールバック）
+  private mediaRecorder: MediaRecorder | null = null;
+  private audioChunks: Blob[] = [];
+
+  // レガシー録音用 VAD（REST API 時のみ使用）
+  private analyser: AnalyserNode | null = null;
+  private vadInterval: number | null = null;
+  private silenceTimer: number | null = null;
+  private hasSpoken = false;
+  private silenceCount = 0;
+  private readonly SILENCE_THRESHOLD = 35;
+  private readonly SILENCE_CHECKS = 5;
+  private readonly MIN_RECORDING = 3000;
+  private SILENCE_DURATION: number;
+  private recordingStartTime = 0;
+
+  constructor(silenceDuration: number = 3500) {
+    this.SILENCE_DURATION = silenceDuration;
+  }
 
   // ============================================================
   // LiveAPI ストリーミング（メイン機能）
@@ -279,6 +298,83 @@ export class AudioManager {
     this.scheduledSources = [];
   }
 
+  // ============================================================
+  // レガシー録音（REST API フォールバック）
+  //
+  // LiveAPI 接続不可時の録音。クライアント側 VAD で無音停止。
+  // ============================================================
+
+  async startLegacyRecording(
+    onStopCallback: (audioBlob: Blob) => void,
+    onSpeechStart?: () => void
+  ) {
+    if (this.recordingTimer) { clearTimeout(this.recordingTimer); this.recordingTimer = null; }
+
+    const stream = await this.getUserMediaSafe({
+      audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
+    });
+    // レガシー録音は独立した MediaStream を使う（シングルトンとは別）
+    const legacyStream = stream;
+
+    // @ts-ignore
+    const ACClass = window.AudioContext || window.webkitAudioContext;
+    const legacyCtx = new ACClass();
+    const source = legacyCtx.createMediaStreamSource(legacyStream);
+    this.analyser = legacyCtx.createAnalyser();
+    this.analyser.fftSize = 512;
+    source.connect(this.analyser);
+
+    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    this.hasSpoken = false;
+    this.silenceCount = 0;
+    this.recordingStartTime = Date.now();
+
+    // クライアント側 VAD（レガシー録音時のみ）
+    this.vadInterval = window.setInterval(() => {
+      if (!this.analyser) return;
+      if (Date.now() - this.recordingStartTime < this.MIN_RECORDING) return;
+      this.analyser.getByteFrequencyData(dataArray);
+      const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+
+      if (avg > this.SILENCE_THRESHOLD) {
+        this.hasSpoken = true;
+        this.silenceCount = 0;
+        if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
+        if (onSpeechStart) onSpeechStart();
+      } else if (this.hasSpoken) {
+        this.silenceCount++;
+        if (this.silenceCount >= this.SILENCE_CHECKS && !this.silenceTimer) {
+          this.silenceTimer = window.setTimeout(() => {
+            if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.stop();
+          }, this.SILENCE_DURATION);
+        }
+      }
+    }, 100);
+
+    // MediaRecorder
+    // @ts-ignore
+    this.mediaRecorder = new MediaRecorder(legacyStream, { mimeType: 'audio/webm;codecs=opus' });
+    this.audioChunks = [];
+
+    this.mediaRecorder.ondataavailable = (ev: any) => {
+      if (ev.data.size > 0) this.audioChunks.push(ev.data);
+    };
+
+    this.mediaRecorder.onstop = () => {
+      this.stopVAD(legacyCtx);
+      legacyStream.getTracks().forEach(t => t.stop());
+      if (this.recordingTimer) { clearTimeout(this.recordingTimer); this.recordingTimer = null; }
+      if (this.audioChunks.length > 0) {
+        onStopCallback(new Blob(this.audioChunks, { type: 'audio/webm' }));
+      }
+    };
+
+    this.mediaRecorder.start();
+
+    this.recordingTimer = window.setTimeout(() => {
+      if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.stop();
+    }, MAX_RECORDING_TIME);
+  }
 
   // ============================================================
   // ユーティリティ
@@ -297,6 +393,11 @@ export class AudioManager {
   fullResetAudioResources() {
     this.stopStreaming();
     this.stopAll();
+
+    if (this.mediaRecorder?.state !== 'inactive') {
+      try { this.mediaRecorder?.stop(); } catch {}
+    }
+    this.mediaRecorder = null;
 
     // WorkletNode
     if (this.workletNode) {
@@ -421,4 +522,15 @@ export class AudioManager {
     throw new Error('マイク機能が見つかりません。HTTPS(鍵マーク)のURLでアクセスしているか確認してください。');
   }
 
+  /** レガシー VAD 停止 */
+  private stopVAD(legacyCtx?: AudioContext) {
+    if (this.vadInterval) { clearInterval(this.vadInterval); this.vadInterval = null; }
+    if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
+    this.analyser = null;
+    this.silenceCount = 0;
+    this.hasSpoken = false;
+    if (legacyCtx && legacyCtx.state !== 'closed') {
+      legacyCtx.close();
+    }
+  }
 }
